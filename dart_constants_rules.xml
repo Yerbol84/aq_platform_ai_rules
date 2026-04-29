@@ -1,0 +1,544 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dart_constants_rules version="1.0">
+  
+  <!-- ============================================ -->
+  <!-- ОСНОВНОЙ ПРИНЦИП -->
+  <!-- ============================================ -->
+  
+  <core_principle>
+    <rule>НИКОГДА не использовать хардкод строк/чисел напрямую</rule>
+    <exception>Только внутри одного файла (локальный scope)</exception>
+    <strictness>
+      Чем шире область использования → тем строже требования к константам
+    </strictness>
+  </core_principle>
+  
+  <!-- ============================================ -->
+  <!-- УРОВНИ СТРОГОСТИ -->
+  <!-- ============================================ -->
+  
+  <strictness_levels>
+    
+    <level number="1" scope="within_file">
+      <title>Внутри одного файла</title>
+      <rule>Можно использовать напрямую</rule>
+      <example type="allowed">
+        <code><![CDATA[
+// feature/profile_screen.dart
+class ProfileScreen extends StatelessWidget {
+  void _showError() {
+    // ✅ OK — используется только в этом файле
+    print('Error loading profile');
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Error'), // ✅ OK — локально
+      ),
+    );
+  }
+}
+        ]]></code>
+      </example>
+    </level>
+    
+    <level number="2" scope="between_files">
+      <title>Между файлами в одном пакете</title>
+      <rule>Минимум — константа, желательно — статика в классе</rule>
+      
+      <example type="incorrect">
+        <code><![CDATA[
+// ❌ НЕПРАВИЛЬНО
+// file_a.dart
+void handleError() {
+  print('Error occurred');
+}
+
+// file_b.dart
+void logError() {
+  print('Error occurred'); // ❌ Дублирование хардкода
+}
+        ]]></code>
+      </example>
+      
+      <example type="acceptable">
+        <code><![CDATA[
+// ✅ МИНИМУМ — константа
+// constants.dart
+const String errorMessage = 'Error occurred';
+
+// file_a.dart
+import 'constants.dart';
+void handleError() {
+  print(errorMessage); // ✅ Используем константу
+}
+        ]]></code>
+      </example>
+      
+      <example type="preferred">
+        <code><![CDATA[
+// ✅ ЛУЧШЕ — статика в классе
+// error_handler.dart
+class ErrorHandler {
+  ErrorHandler._();
+  
+  static const String defaultMessage = 'Error occurred';
+  static const String networkError = 'Network error';
+  static const int maxRetries = 3;
+}
+
+// file_a.dart
+import 'error_handler.dart';
+void handleError() {
+  print(ErrorHandler.defaultMessage); // ✅
+}
+        ]]></code>
+      </example>
+    </level>
+    
+    <level number="3" scope="between_packages">
+      <title>Между пакетами</title>
+      <rule>ОБЯЗАТЕЛЬНО через Model.keys — никогда напрямую</rule>
+      <rationale>
+        Пакеты изолированы. Ключи модели — контракт между пакетами.
+        Изменение ключа должно ломать компиляцию, не runtime.
+      </rationale>
+      
+      <example type="incorrect">
+        <code><![CDATA[
+// ❌ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО
+// Package A: aq_schema/models/user.dart
+class User {
+  final String id;
+  final String name;
+  
+  Map<String, dynamic> toJson() => {
+    'id': id,        // ❌ Хардкод
+    'name': name,    // ❌ Хардкод
+  };
+}
+
+// Package B: dart_vault
+class VaultStorage {
+  Future<User> loadUser(Map<String, dynamic> json) {
+    return User(
+      id: json['id'],      // ❌ Хардкод — нарушение контракта
+      name: json['name'],  // ❌ Хардкод
+    );
+  }
+}
+        ]]></code>
+        <why_wrong>
+          При изменении ключа 'id' → 'userId' в User:
+          - toJson() изменится
+          - VaultStorage сломается в runtime (не в compile time!)
+          - Нет гарантии синхронизации между пакетами
+        </why_wrong>
+      </example>
+      
+      <example type="correct">
+        <code><![CDATA[
+// ✅ ПРАВИЛЬНО
+// Package A: aq_schema/models/user.dart
+class User {
+  static final _UserKeys _keys = _UserKeys._();
+  static _UserKeys get keys => _keys;
+  
+  final String id;
+  final String name;
+  
+  Map<String, dynamic> toJson() => {
+    User.keys.id: id,      // ✅ Через keys
+    User.keys.name: name,  // ✅ Через keys
+  };
+  
+  factory User.fromJson(Map<String, dynamic> json) => User(
+    id: json[User.keys.id] as String,    // ✅ Через keys
+    name: json[User.keys.name] as String, // ✅ Через keys
+  );
+}
+
+class _UserKeys {
+  _UserKeys._();
+  
+  final String id = 'id';
+  final String name = 'name';
+  
+  // Все зависимости используют переменные
+  List<String> get all => [id, name];
+  Set<String> get required => {id, name};
+}
+
+// Package B: dart_vault
+import 'package:aq_schema/models/user.dart';
+
+class VaultStorage {
+  Future<User> loadUser(Map<String, dynamic> json) {
+    return User(
+      id: json[User.keys.id],      // ✅ Через keys
+      name: json[User.keys.name],  // ✅ Через keys
+    );
+  }
+  
+  Future<void> saveUser(User user) {
+    final json = {
+      User.keys.id: user.id,      // ✅ Через keys
+      User.keys.name: user.name,  // ✅ Через keys
+    };
+    await _db.insert('users', json);
+  }
+}
+        ]]></code>
+        <why_correct>
+          При изменении ключа 'id' → 'userId':
+          - Меняем только в _UserKeys: final String id = 'userId';
+          - Все использования User.keys.id автоматически получают новое значение
+          - Compile-time безопасность: IDE подсветит все места использования
+        </why_correct>
+      </example>
+    </level>
+    
+  </strictness_levels>
+  
+  <!-- ============================================ -->
+  <!-- РЕАЛИЗАЦИЯ УРОВНЯ 3: Model.keys -->
+  <!-- ============================================ -->
+  
+  <model_keys_pattern>
+    
+    <structure>
+      <code><![CDATA[
+class MyModel {
+  // 1. Приватный класс ключей
+  static final _MyModelKeys _keys = _MyModelKeys._();
+  
+  // 2. Публичный геттер
+  static _MyModelKeys get keys => _keys;
+  
+  // 3. Поля модели
+  final String field1;
+  final int field2;
+  
+  // 4. Использование keys в методах
+  Map<String, dynamic> toJson() => {
+    MyModel.keys.field1: field1,
+    MyModel.keys.field2: field2,
+  };
+  
+  factory MyModel.fromJson(Map<String, dynamic> json) => MyModel(
+    field1: json[MyModel.keys.field1],
+    field2: json[MyModel.keys.field2],
+  );
+}
+
+// Приватный класс ключей
+class _MyModelKeys {
+  _MyModelKeys._(); // Приватный конструктор
+  
+  // Поля НЕ статические (доступ через экземпляр keys)
+  final String field1 = 'field1';
+  final String field2 = 'field2';
+  
+  // Методы используют переменные, не дублируют строки
+  List<String> get all => [field1, field2];
+  Set<String> get required => {field1};
+  Set<String> get optional => {field2};
+}
+      ]]></code>
+    </structure>
+    
+    <rules>
+      <rule id="private_class">
+        <title>Класс ключей приватный</title>
+        <pattern>class _ModelKeys { ... }</pattern>
+        <reason>Не должен использоваться напрямую, только через Model.keys</reason>
+      </rule>
+      
+      <rule id="private_constructor">
+        <title>Приватный конструктор</title>
+        <pattern>_ModelKeys._();</pattern>
+        <reason>Запрет создания экземпляров извне</reason>
+      </rule>
+      
+      <rule id="non_static_fields">
+        <title>Поля НЕ статические</title>
+        <pattern>final String fieldName = 'field_name';</pattern>
+        <reason>Доступ через экземпляр Model.keys.fieldName</reason>
+      </rule>
+      
+      <rule id="single_instance">
+        <title>Единственный экземпляр</title>
+        <pattern>static final _ModelKeys _keys = _ModelKeys._();</pattern>
+        <reason>Создаётся один раз, переиспользуется</reason>
+      </rule>
+      
+      <rule id="public_getter">
+        <title>Публичный геттер</title>
+        <pattern>static _ModelKeys get keys => _keys;</pattern>
+        <reason>Единственная точка доступа к ключам</reason>
+      </rule>
+      
+      <rule id="use_variables">
+        <title>Использовать переменные, не дублировать строки</title>
+        <incorrect>List&lt;String&gt; get all => ['field1', 'field2'];</incorrect>
+        <correct>List&lt;String&gt; get all => [field1, field2];</correct>
+        <reason>Изменение ключа автоматически обновляет все зависимости</reason>
+      </rule>
+    </rules>
+    
+  </model_keys_pattern>
+  
+  <!-- ============================================ -->
+  <!-- ПРОВЕРКИ ПЕРЕД ГЕНЕРАЦИЕЙ КОДА -->
+  <!-- ============================================ -->
+  
+  <pre_generation_checks>
+    
+    <check name="string_literal_usage">
+      <trigger>Использование строкового литерала в коде</trigger>
+      <questions>
+        1. Это внутри одного файла? → OK
+        2. Используется в нескольких файлах? → Константа или статика
+        3. Это ключ модели между пакетами? → ОБЯЗАТЕЛЬНО Model.keys
+      </questions>
+    </check>
+    
+    <check name="model_without_keys">
+      <trigger>Создание модели с полями</trigger>
+      <question>Есть ли класс _ModelKeys?</question>
+      <if_no>
+        СОЗДАТЬ _ModelKeys даже если сейчас ключей мало.
+        Это облегчит будущее расширение.
+      </if_no>
+    </check>
+    
+    <check name="json_serialization">
+      <trigger>toJson() или fromJson() в модели</trigger>
+      <validation>
+        Все ключи используют Model.keys.field?
+      </validation>
+      <if_no>
+        ОШИБКА: Замени хардкод на Model.keys
+      </if_no>
+    </check>
+    
+    <check name="cross_package_access">
+      <trigger>Импорт модели из другого пакета</trigger>
+      <validation>
+        Все обращения к полям через Model.keys?
+      </validation>
+      <if_no>
+        ОШИБКА: Используй Model.keys.field вместо 'field'
+      </if_no>
+    </check>
+    
+  </pre_generation_checks>
+  
+  <!-- ============================================ -->
+  <!-- ПРИМЕРЫ ПО КОНТЕКСТУ -->
+  <!-- ============================================ -->
+  
+  <context_examples>
+    
+    <example context="aq_schema_model">
+      <description>Модель в aq_schema (используется между пакетами)</description>
+      <code><![CDATA[
+// aq_schema/models/workflow_graph.dart
+class WorkflowGraph {
+  static final _WorkflowGraphKeys _keys = _WorkflowGraphKeys._();
+  static _WorkflowGraphKeys get keys => _keys;
+  
+  final String id;
+  final String name;
+  final List<Node> nodes;
+  
+  Map<String, dynamic> toJson() => {
+    WorkflowGraph.keys.id: id,
+    WorkflowGraph.keys.name: name,
+    WorkflowGraph.keys.nodes: nodes.map((n) => n.toJson()).toList(),
+  };
+}
+
+class _WorkflowGraphKeys {
+  _WorkflowGraphKeys._();
+  
+  final String id = 'id';
+  final String name = 'name';
+  final String nodes = 'nodes';
+  
+  List<String> get all => [id, name, nodes];
+}
+      ]]></code>
+    </example>
+    
+    <example context="package_using_model">
+      <description>Пакет использует модель из aq_schema</description>
+      <code><![CDATA[
+// dart_vault/lib/server/vault_storage.dart
+import 'package:aq_schema/models/workflow_graph.dart';
+
+class VaultStorage {
+  Future<WorkflowGraph> loadGraph(String graphId) async {
+    final json = await _db.query('graphs', 
+      where: '${WorkflowGraph.keys.id} = ?', // ✅ Через keys
+      whereArgs: [graphId],
+    );
+    
+    return WorkflowGraph.fromJson(json.first);
+  }
+  
+  Future<void> saveGraph(WorkflowGraph graph) async {
+    await _db.insert('graphs', {
+      WorkflowGraph.keys.id: graph.id,        // ✅ Через keys
+      WorkflowGraph.keys.name: graph.name,    // ✅ Через keys
+      WorkflowGraph.keys.nodes: jsonEncode(graph.nodes),
+    });
+  }
+}
+      ]]></code>
+    </example>
+    
+    <example context="app_constants">
+      <description>Общие константы приложения (Уровень 2)</description>
+      <code><![CDATA[
+// core/constants/app_constants.dart
+class AppConstants {
+  AppConstants._();
+  
+  static const String apiBaseUrl = 'https://api.example.com/v1';
+  static const int connectionTimeout = 30000;
+  static const String defaultLocale = 'en';
+}
+
+class Endpoints {
+  Endpoints._();
+  
+  static const String users = '/users';
+  static const String graphs = '/graphs';
+  static const String auth = '/auth';
+}
+      ]]></code>
+    </example>
+    
+  </context_examples>
+  
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ ДЛЯ AI -->
+  <!-- ============================================ -->
+  
+  <ai_checklist>
+    
+    <before_writing_code>
+      <step number="1">
+        <question>Где будет использоваться эта строка/число?</question>
+        <answers>
+          - Только в этом файле → можно напрямую
+          - В нескольких файлах → константа или статика
+          - Между пакетами → ОБЯЗАТЕЛЬНО Model.keys
+        </answers>
+      </step>
+      
+      <step number="2">
+        <question>Это модель с полями?</question>
+        <if_yes>
+          - Создать класс _ModelKeys
+          - Добавить static get keys
+          - Все toJson/fromJson через keys
+        </if_yes>
+      </step>
+      
+      <step number="3">
+        <question>Импортирую модель из другого пакета?</question>
+        <if_yes>
+          - НИКОГДА не использовать хардкод ключей
+          - ВСЕГДА через Model.keys.field
+        </if_yes>
+      </step>
+    </before_writing_code>
+    
+    <after_writing_code>
+      <check>Нет ли хардкода строк в toJson/fromJson?</check>
+      <check>Все ли ключи модели через Model.keys?</check>
+      <check>Используют ли методы в _Keys переменные (не дублируют строки)?</check>
+      <check>Есть ли приватный конструктор в классах констант?</check>
+    </after_writing_code>
+    
+  </ai_checklist>
+  
+  <!-- ============================================ -->
+  <!-- ЗАПРЕЩЁННЫЕ ПАТТЕРНЫ -->
+  <!-- ============================================ -->
+  
+  <forbidden_patterns>
+    
+    <pattern id="hardcoded_json_keys">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО
+Map<String, dynamic> toJson() => {
+  'id': id,
+  'name': name,
+};
+      ]]></code>
+      <correct><![CDATA[
+// ✅ ПРАВИЛЬНО
+Map<String, dynamic> toJson() => {
+  Model.keys.id: id,
+  Model.keys.name: name,
+};
+      ]]></correct>
+    </pattern>
+    
+    <pattern id="hardcoded_db_columns">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО
+await db.query('users', where: 'id = ?', whereArgs: [userId]);
+      ]]></code>
+      <correct><![CDATA[
+// ✅ ПРАВИЛЬНО
+await db.query('users', 
+  where: '${User.keys.id} = ?', 
+  whereArgs: [userId]
+);
+      ]]></correct>
+    </pattern>
+    
+    <pattern id="string_duplication_in_keys">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО
+class _UserKeys {
+  final String id = 'id';
+  final String name = 'name';
+  
+  List<String> get all => ['id', 'name']; // ❌ Дублирование
+}
+      ]]></code>
+      <correct><![CDATA[
+// ✅ ПРАВИЛЬНО
+class _UserKeys {
+  final String id = 'id';
+  final String name = 'name';
+  
+  List<String> get all => [id, name]; // ✅ Используем переменные
+}
+      ]]></correct>
+    </pattern>
+    
+    <pattern id="static_fields_in_keys">
+      <code><![CDATA[
+// ❌ НЕПРАВИЛЬНО
+class _UserKeys {
+  static const String id = 'id'; // ❌ Статические поля
+}
+// Доступ: _UserKeys.id (не через Model.keys)
+      ]]></code>
+      <correct><![CDATA[
+// ✅ ПРАВИЛЬНО
+class _UserKeys {
+  final String id = 'id'; // ✅ Нестатические
+}
+// Доступ: User.keys.id (через экземпляр)
+      ]]></correct>
+    </pattern>
+    
+  </forbidden_patterns>
+  
+</dart_constants_rules>

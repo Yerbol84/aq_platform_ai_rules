@@ -1,0 +1,541 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package_design_rules version="1.0">
+  
+  <!-- ============================================ -->
+  <!-- СЛОЙ vs ПАКЕТ -->
+  <!-- ============================================ -->
+  
+  <core_concepts>
+    
+    <concept name="layer">
+      <definition>Слой = абстракция (интерфейсы в aq_schema)</definition>
+      <examples>
+        - Слой безопасности → IAQAuthService в aq_schema/security.dart
+        - Слой данных → IAQVaultClient в aq_schema/data.dart
+        - Слой инструментов → IAQToolService в aq_schema/tools.dart
+      </examples>
+      <location>aq_schema/</location>
+    </concept>
+    
+    <concept name="package">
+      <definition>Пакет = реализация слоя (клиент + сервер)</definition>
+      <examples>
+        - aq_security → реализует IAQAuthService
+        - dart_vault → реализует IAQVaultClient
+        - aq_tool_service → реализует IAQToolService
+      </examples>
+      <location>pkgs/{package_name}/</location>
+    </concept>
+    
+    <relationship>
+      Слой (aq_schema) ← implements ← Пакет (pkgs/)
+      
+      Другие пакеты используют слой через интерфейс, не зная о реализации.
+    </relationship>
+    
+  </core_concepts>
+  
+  <!-- ============================================ -->
+  <!-- СТРУКТУРА ПАКЕТА -->
+  <!-- ============================================ -->
+  
+  <package_structure>
+    
+    <standard_layout>
+      <code><![CDATA[
+my_package/
+├── lib/
+│   ├── my_package.dart           # export client/ — для клиентов
+│   ├── client/                   # Тонкий клиент (HTTP/gRPC)
+│   │   └── my_client.dart        # implements IMyService
+│   ├── server/                   # Вся бизнес-логика
+│   │   ├── my_server.dart        # Серверная реализация
+│   │   └── storage/              # Storage (только на сервере!)
+│   └── server.dart               # export server/ — для сервера
+├── test/
+│   ├── integration/              # Клиент + сервер вместе
+│   └── unit/
+└── pubspec.yaml
+      ]]></code>
+    </standard_layout>
+    
+    <export_rules>
+      <rule id="client_export">
+        <file>lib/my_package.dart</file>
+        <exports>ТОЛЬКО client/</exports>
+        <used_by>Приложения которые используют пакет как клиент</used_by>
+        <example>
+          <code><![CDATA[
+// lib/my_package.dart
+library my_package;
+
+export 'client/my_client.dart';
+// НЕ экспортируем server/
+          ]]></code>
+        </example>
+      </rule>
+      
+      <rule id="server_export">
+        <file>lib/server.dart</file>
+        <exports>server/ + client/ (всё)</exports>
+        <used_by>Приложение которое запускает пакет как сервер</used_by>
+        <example>
+          <code><![CDATA[
+// lib/server.dart
+library my_package.server;
+
+export 'server/my_server.dart';
+export 'server/storage/my_storage.dart';
+export 'client/my_client.dart'; // Сервер может использовать свой клиент
+          ]]></code>
+        </example>
+      </rule>
+    </export_rules>
+    
+  </package_structure>
+  
+  <!-- ============================================ -->
+  <!-- ДВА РЕЖИМА ИМПОРТА -->
+  <!-- ============================================ -->
+  
+  <import_modes>
+    
+    <mode name="client">
+      <when>Приложение использует пакет удалённо</when>
+      <import>import 'package:my_package/my_package.dart';</import>
+      <gets>Тонкий клиент (HTTP/gRPC транспорт)</gets>
+      <example>
+        <code><![CDATA[
+// graph_service/main.dart
+import 'package:aq_security/aq_security.dart'; // Клиентский режим
+
+void main() async {
+  // Подключается к удалённому серверу безопасности
+  await AQSecurity.connect('http://auth-service:8080');
+  
+  // Использует через интерфейс
+  final canAccess = await IAQAuthService.instance
+    .canAccess(userId, resource, 'read');
+}
+        ]]></code>
+      </example>
+    </mode>
+    
+    <mode name="server">
+      <when>Приложение запускает пакет как сервер</when>
+      <import>import 'package:my_package/server.dart';</import>
+      <gets>Полная реализация + возможность запустить сервер</gets>
+      <example>
+        <code><![CDATA[
+// auth_service/main.dart
+import 'package:aq_security/server.dart'; // Серверный режим
+import 'package:dart_vault/dart_vault.dart'; // Клиент
+
+void main() async {
+  // Vault как удалённый клиент
+  await Vault.connect('http://vault-service:8765');
+  
+  // Security как сервер (вся логика здесь)
+  final authServer = AuthService(
+    storage: Vault.instance, // использует vault через клиент
+  );
+  
+  // Запускает HTTP сервер
+  await authServer.serve(port: 8080);
+}
+        ]]></code>
+      </example>
+    </mode>
+    
+  </import_modes>
+  
+  <!-- ============================================ -->
+  <!-- ПРИЛОЖЕНИЕ = ТОЧКА СБОРКИ -->
+  <!-- ============================================ -->
+  
+  <application_assembly>
+    
+    <principle>
+      Приложение выбирает:
+      - Какой пакет запустить как СЕРВЕР (один)
+      - Какие пакеты использовать как КЛИЕНТЫ (остальные)
+      - Как их соединить (handshake, init)
+    </principle>
+    
+    <example name="auth_service">
+      <description>Приложение безопасности</description>
+      <code><![CDATA[
+// server_apps/auth_service/main.dart
+
+import 'package:aq_security/server.dart';      // ✅ Сервер
+import 'package:dart_vault/dart_vault.dart';   // ✅ Клиент
+
+void main() async {
+  // 1. Инициализация клиентов
+  await Vault.connect('http://vault-service:8765');
+  
+  // 2. Создание сервера
+  final authServer = AuthService(
+    storage: Vault.instance,
+    jwtSecret: env['JWT_SECRET'],
+  );
+  
+  // 3. Регистрация в AQPlatform
+  AQPlatform.init(auth: authServer);
+  
+  // 4. Запуск HTTP сервера
+  await authServer.serve(port: 8080);
+  print('Auth service running on :8080');
+}
+      ]]></code>
+    </example>
+    
+    <example name="graph_service">
+      <description>Приложение графового движка</description>
+      <code><![CDATA[
+// server_apps/graph_service/main.dart
+
+import 'package:aq_graph_engine/server.dart';  // ✅ Сервер
+import 'package:aq_security/aq_security.dart'; // ✅ Клиент
+import 'package:dart_vault/dart_vault.dart';   // ✅ Клиент
+import 'package:aq_tool_service/aq_tool_service.dart'; // ✅ Клиент
+
+void main() async {
+  // 1. Инициализация всех клиентов
+  await AQSecurity.connect('http://auth-service:8080');
+  await Vault.connect('http://vault-service:8765');
+  await ToolService.connect('http://tools-service:9090');
+  
+  // 2. Создание сервера движка
+  final engine = GraphEngine(
+    auth: AQSecurity.instance,
+    vault: Vault.instance,
+    tools: ToolService.instance,
+  );
+  
+  // 3. Регистрация
+  AQPlatform.init(
+    auth: AQSecurity.instance,
+    vault: Vault.instance,
+    tools: ToolService.instance,
+    engine: engine,
+  );
+  
+  // 4. Запуск
+  await engine.serve(port: 9000);
+  print('Graph engine running on :9000');
+}
+      ]]></code>
+    </example>
+    
+  </application_assembly>
+  
+  <!-- ============================================ -->
+  <!-- ДЕЛЕГИРОВАНИЕ ЧЕРЕЗ ПОРТЫ -->
+  <!-- ============================================ -->
+  
+  <delegation_through_ports>
+    
+    <principle>
+      Пакеты НЕ зависят друг от друга напрямую.
+      Взаимодействие ТОЛЬКО через интерфейсы (порты) из aq_schema.
+    </principle>
+    
+    <pattern name="vault_delegates_to_security">
+      <description>
+        dart_vault хранит данные, но должен их защищать.
+        Защита делегируется aq_security через порт IAQAuthService.
+      </description>
+      
+      <step number="1">
+        <title>aq_schema объявляет порт</title>
+        <code><![CDATA[
+// aq_schema/security.dart
+abstract interface class IAQAuthService {
+  static IAQAuthService get instance => AQPlatform.resolve();
+  
+  Future<bool> canAccess(String userId, String resource, String action);
+}
+        ]]></code>
+      </step>
+      
+      <step number="2">
+        <title>aq_security реализует порт</title>
+        <code><![CDATA[
+// aq_security/lib/server/auth_service.dart
+class AuthService implements IAQAuthService {
+  @override
+  Future<bool> canAccess(String userId, String resource, String action) {
+    // Вся логика проверки прав
+    final user = await _loadUser(userId);
+    final policy = await _getPolicy(resource);
+    return policy.allows(user, action);
+  }
+}
+        ]]></code>
+      </step>
+      
+      <step number="3">
+        <title>dart_vault использует порт (НЕ знает о aq_security)</title>
+        <code><![CDATA[
+// dart_vault/lib/server/vault_storage.dart
+import 'package:aq_schema/security.dart'; // ✅ Только интерфейс!
+
+class VaultStorage {
+  Future<void> write(String key, value, String userId) async {
+    // Делегирует проверку через порт
+    final allowed = await IAQAuthService.instance
+      .canAccess(userId, key, 'write');
+    
+    if (!allowed) throw AccessDenied();
+    
+    // Своя работа — хранение
+    await _db.insert(key, value);
+  }
+}
+        ]]></code>
+      </step>
+      
+      <step number="4">
+        <title>Приложение регистрирует реализацию</title>
+        <code><![CDATA[
+// vault_service/main.dart
+import 'package:dart_vault/server.dart';
+import 'package:aq_security/aq_security.dart'; // Клиент
+
+void main() async {
+  // Security как удалённый клиент
+  await AQSecurity.connect('http://auth-service:8080');
+  
+  // Vault как сервер
+  final vaultServer = VaultStorage(db: postgres);
+  
+  // Регистрация: теперь VaultStorage.write() будет вызывать
+  // AuthService.canAccess() через IAQAuthService.instance
+  AQPlatform.init(
+    auth: AQSecurity.instance,
+    vault: vaultServer,
+  );
+  
+  await vaultServer.serve(port: 8765);
+}
+        ]]></code>
+      </step>
+      
+      <benefits>
+        - dart_vault НЕ знает о aq_security (нет зависимости)
+        - aq_security НЕ знает о dart_vault
+        - Можно подменить реализацию (mock для тестов)
+        - Полная изоляция пакетов
+      </benefits>
+    </pattern>
+    
+    <forbidden>
+      <code><![CDATA[
+// ❌ НЕПРАВИЛЬНО — прямая зависимость
+// dart_vault/pubspec.yaml
+dependencies:
+  aq_security: ^1.0.0  # ❌ ЗАПРЕЩЕНО!
+
+// dart_vault/lib/server/vault_storage.dart
+import 'package:aq_security/server.dart'; // ❌ ЗАПРЕЩЕНО!
+
+class VaultStorage {
+  final AuthService _auth; // ❌ Конкретная реализация
+}
+      ]]></code>
+      <why_wrong>
+        Создаёт прямую зависимость между пакетами.
+        Нарушает изоляцию и модульность.
+      </why_wrong>
+    </forbidden>
+    
+  </delegation_through_ports>
+  
+  <!-- ============================================ -->
+  <!-- ТОНКИЙ КЛИЕНТ -->
+  <!-- ============================================ -->
+  
+  <thin_client_principle>
+    
+    <definition>
+      Клиент пакета = транспортный слой.
+      Вся логика на сервере.
+    </definition>
+    
+    <client_responsibilities>
+      <allowed>
+        - HTTP/gRPC запросы
+        - Сериализация/десериализация
+        - Обработка сетевых ошибок
+        - Кеширование (опционально)
+      </allowed>
+      
+      <forbidden>
+        - Бизнес-валидация
+        - Проверка прав доступа
+        - Дублирование серверной логики
+        - Хардкод бизнес-правил
+      </forbidden>
+    </client_responsibilities>
+    
+    <example type="correct">
+      <code><![CDATA[
+// dart_vault/lib/client/vault_client.dart
+class VaultClient implements IAQVaultClient {
+  final HttpClient _http;
+  
+  @override
+  Future<void> write(String key, dynamic value) async {
+    // Просто отправляет. Вся логика на сервере.
+    final response = await _http.post('/vault/write', 
+      body: {'key': key, 'value': value}
+    );
+    
+    if (!response.ok) throw VaultException(response.error);
+  }
+}
+      ]]></code>
+    </example>
+    
+    <example type="incorrect">
+      <code><![CDATA[
+// ❌ НЕПРАВИЛЬНО — толстый клиент
+class VaultClient {
+  Future<void> write(String key, dynamic value) async {
+    // ❌ Валидация на клиенте
+    if (key.isEmpty) throw ValidationError();
+    
+    // ❌ Проверка прав на клиенте
+    if (!_localCache.canWrite(key)) throw AccessDenied();
+    
+    await _http.post('/vault/write', body: {...});
+  }
+}
+      ]]></code>
+    </example>
+    
+  </thin_client_principle>
+  
+  <!-- ============================================ -->
+  <!-- РАЗДЕЛЕНИЕ ОТВЕТСТВЕННОСТИ -->
+  <!-- ============================================ -->
+  
+  <separation_of_concerns>
+    
+    <rule>Один пакет = одна зона ответственности</rule>
+    
+    <domains>
+      <domain name="aq_security">
+        <does>Auth, авторизация, роли, токены</does>
+        <does_not>Хранение, графы, LLM</does_not>
+      </domain>
+      
+      <domain name="dart_vault">
+        <does>CRUD, версионирование, query</does>
+        <does_not>Проверка прав, бизнес-логика графов</does_not>
+      </domain>
+      
+      <domain name="aq_graph_engine">
+        <does>Выполнение графов, suspend/resume</does>
+        <does_not>Хранение, проверка прав, LLM вызовы</does_not>
+      </domain>
+      
+      <domain name="aq_tool_service">
+        <does>LLM, vault tools, MCP серверы</does>
+        <does_not>Хранение, проверка прав, выполнение графов</does_not>
+      </domain>
+    </domains>
+    
+    <forbidden_patterns>
+      <pattern>
+        <location>dart_vault</location>
+        <code>if (user.role == 'admin') { ... }</code>
+        <why_wrong>Роли — компетенция aq_security</why_wrong>
+        <correct>await IAQAuthService.instance.canAccess(...)</correct>
+      </pattern>
+      
+      <pattern>
+        <location>aq_security</location>
+        <code>await db.insert('users', ...)</code>
+        <why_wrong>Хранение — компетенция dart_vault</why_wrong>
+        <correct>await IAQVaultClient.instance.write(...)</correct>
+      </pattern>
+      
+      <pattern>
+        <location>aq_graph_engine</location>
+        <code>http.post('https://api.anthropic.com/...')</code>
+        <why_wrong>LLM — компетенция aq_tool_service</why_wrong>
+        <correct>await toolService.llm.complete(...)</correct>
+      </pattern>
+    </forbidden_patterns>
+    
+  </separation_of_concerns>
+  
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ СОЗДАНИЯ ПАКЕТА -->
+  <!-- ============================================ -->
+  
+  <package_creation_checklist>
+    
+    <step number="1">
+      <title>Определить слой в aq_schema</title>
+      <tasks>
+        ☐ Создать интерфейс в aq_schema (IAQMyService)
+        ☐ Определить доменные модели
+        ☐ Добавить в соответствующий barrel (security.dart, data.dart, etc.)
+      </tasks>
+    </step>
+    
+    <step number="2">
+      <title>Создать структуру пакета</title>
+      <tasks>
+        ☐ pkgs/my_package/lib/client/
+        ☐ pkgs/my_package/lib/server/
+        ☐ pkgs/my_package/lib/my_package.dart (export client/)
+        ☐ pkgs/my_package/lib/server.dart (export server/)
+      </tasks>
+    </step>
+    
+    <step number="3">
+      <title>Реализовать тонкий клиент</title>
+      <tasks>
+        ☐ Implements интерфейс из aq_schema
+        ☐ Только HTTP/gRPC транспорт
+        ☐ Никакой бизнес-логики
+        ☐ Handshake с сервером (если нужно)
+      </tasks>
+    </step>
+    
+    <step number="4">
+      <title>Реализовать сервер</title>
+      <tasks>
+        ☐ Вся бизнес-логика здесь
+        ☐ Использует другие пакеты через интерфейсы (IAQAuthService.instance)
+        ☐ НЕ хардкодит чужую компетенцию
+        ☐ Делегирует через порты
+      </tasks>
+    </step>
+    
+    <step number="5">
+      <title>Написать тесты</title>
+      <tasks>
+        ☐ Integration тесты (клиент + сервер)
+        ☐ Unit тесты логики
+        ☐ Mock тесты с подменой зависимостей
+      </tasks>
+    </step>
+    
+    <step number="6">
+      <title>Создать приложение-сервер</title>
+      <tasks>
+        ☐ server_apps/my_service/main.dart
+        ☐ Import пакета как сервер
+        ☐ Import зависимостей как клиенты
+        ☐ Инициализация и запуск
+      </tasks>
+    </step>
+    
+  </package_creation_checklist>
+  
+</package_design_rules>

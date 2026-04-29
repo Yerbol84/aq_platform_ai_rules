@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package_work_rules version="1.0">
+  
+  <!-- ============================================ -->
+  <!-- КРИТИЧЕСКИЕ ПРАВИЛА РАБОТЫ С ПАКЕТАМИ -->
+  <!-- ============================================ -->
+  
+  <critical_rules>
+    
+    <rule id="single_package_scope" priority="CRITICAL">
+      <title>Одна сессия = Один пакет</title>
+      <description>
+        В текущей сессии работа ведётся ТОЛЬКО с одним пакетом.
+        Все изменения, чтение, модификации — только внутри этого пакета.
+      </description>
+      <enforcement>
+        <must>
+          - Определить текущий пакет в начале сессии
+          - Все операции fs_write, fs_read — только внутри директории пакета
+          - Перед любым изменением — проверить что путь внутри текущего пакета
+        </must>
+        <must_not>
+          - Изменять файлы в других пакетах
+          - Изменять aq_schema (это справочник, не текущий пакет)
+          - Изменять другие пакеты "для совместимости"
+        </must_not>
+      </enforcement>
+      <violation_response>
+        НЕМЕДЛЕННО остановиться и сообщить:
+        "❌ НАРУШЕНИЕ: Попытка изменить файл вне текущего пакета.
+        Текущий пакет: {current_package}
+        Попытка изменить: {attempted_path}
+        Это запрещено правилами архитектуры."
+      </violation_response>
+    </rule>
+    
+    <rule id="aq_schema_readonly" priority="CRITICAL">
+      <title>aq_schema — только чтение</title>
+      <description>
+        aq_schema — единый источник истины. Это справочник.
+        Его можно ЧИТАТЬ, но НЕЛЬЗЯ изменять в рамках работы с пакетом.
+      </description>
+      <enforcement>
+        <allowed>
+          - fs_read из aq_schema для понимания интерфейсов
+          - code tool для поиска символов в aq_schema
+          - Ссылки на типы из aq_schema в коде пакета
+        </allowed>
+        <forbidden>
+          - fs_write в любой файл aq_schema
+          - Добавление новых файлов в aq_schema
+          - "Исправление" интерфейсов в aq_schema
+        </forbidden>
+      </enforcement>
+      <rationale>
+        aq_schema меняется отдельно, в своей сессии, с полным пониманием
+        влияния на ВСЕ пакеты. Изменение aq_schema в контексте одного пакета
+        нарушает архитектуру.
+      </rationale>
+    </rule>
+    
+    <rule id="other_packages_readonly" priority="CRITICAL">
+      <title>Другие пакеты — справочные</title>
+      <description>
+        Все пакеты кроме текущего — справочные материалы.
+        Можно читать для понимания паттернов, но нельзя изменять.
+      </description>
+      <enforcement>
+        <allowed>
+          - Читать код других пакетов как примеры
+          - Копировать паттерны (не код!) в текущий пакет
+          - Понимать как другие пакеты используют aq_schema
+        </allowed>
+        <forbidden>
+          - Изменять другие пакеты
+          - "Синхронизировать" изменения между пакетами
+          - Исправлять баги в других пакетах
+        </forbidden>
+      </enforcement>
+      <correct_approach>
+        Если нужно изменить другой пакет:
+        1. Завершить работу с текущим пакетом
+        2. Начать НОВУЮ сессию с другим пакетом как текущим
+        3. Внести изменения в новой сессии
+      </correct_approach>
+    </rule>
+    
+  </critical_rules>
+  
+  <!-- ============================================ -->
+  <!-- WORKFLOW: Начало работы с пакетом -->
+  <!-- ============================================ -->
+  
+  <workflow name="package_session_start">
+    <step number="1">
+      <action>Определить текущий пакет</action>
+      <how>
+        Пользователь явно указывает: "Работаем с пакетом X"
+        ИЛИ из контекста понятно (путь к файлу, название задачи)
+      </how>
+      <output>
+        Переменная: CURRENT_PACKAGE = "pkgs/{package_name}"
+      </output>
+    </step>
+    
+    <step number="2">
+      <action>Подтвердить с пользователем</action>
+      <template>
+        "Текущий пакет: {package_name}
+        Все изменения будут только внутри: {CURRENT_PACKAGE}/
+        aq_schema и другие пакеты — только для чтения.
+        Продолжаем?"
+      </template>
+    </step>
+    
+    <step number="3">
+      <action>Изучить структуру текущего пакета</action>
+      <commands>
+        - fs_read: {CURRENT_PACKAGE}/ (Directory mode)
+        - fs_read: {CURRENT_PACKAGE}/pubspec.yaml
+        - fs_read: {CURRENT_PACKAGE}/README.md (если есть)
+      </commands>
+    </step>
+    
+    <step number="4">
+      <action>Изучить зависимости от aq_schema</action>
+      <commands>
+        - grep: "import 'package:aq_schema" в {CURRENT_PACKAGE}
+        - Понять какие интерфейсы использует пакет
+      </commands>
+    </step>
+    
+    <step number="5">
+      <action>Готов к работе</action>
+      <output>
+        "✅ Готов к работе с пакетом {package_name}
+        Scope: {CURRENT_PACKAGE}/
+        Зависимости от aq_schema: {список интерфейсов}"
+      </output>
+    </step>
+  </workflow>
+  
+  <!-- ============================================ -->
+  <!-- ПРОВЕРКИ ПЕРЕД ДЕЙСТВИЕМ -->
+  <!-- ============================================ -->
+  
+  <pre_action_checks>
+    
+    <check name="before_fs_write">
+      <trigger>Любой вызов fs_write</trigger>
+      <validation>
+        path.startsWith(CURRENT_PACKAGE + '/')
+      </validation>
+      <on_fail>
+        ABORT operation
+        MESSAGE: "❌ Попытка записи вне текущего пакета: {path}"
+      </on_fail>
+    </check>
+    
+    <check name="before_fs_write_aq_schema">
+      <trigger>fs_write с path содержащим "aq_schema"</trigger>
+      <validation>
+        ALWAYS FALSE
+      </validation>
+      <on_fail>
+        ABORT operation
+        MESSAGE: "❌ ЗАПРЕЩЕНО: Изменение aq_schema в контексте пакета.
+        aq_schema — справочник, только чтение."
+      </on_fail>
+    </check>
+    
+    <check name="before_create_file">
+      <trigger>fs_write command="create"</trigger>
+      <validation>
+        1. path внутри CURRENT_PACKAGE
+        2. path соответствует структуре пакета (lib/, test/, etc.)
+      </validation>
+      <on_fail>
+        WARN: "Создание файла вне стандартной структуры: {path}"
+        ASK: "Продолжить?"
+      </on_fail>
+    </check>
+    
+  </pre_action_checks>
+  
+  <!-- ============================================ -->
+  <!-- АРХИТЕКТУРНЫЕ ПРАВИЛА ИЗ PACKAGE_ARCHITECTURE.md -->
+  <!-- ============================================ -->
+  
+  <architecture_rules source="PACKAGE_ARCHITECTURE.md">
+    
+    <rule id="aq_schema_is_truth">
+      <principle>aq_schema — единственный источник истины</principle>
+      <implications>
+        - Все доменные модели определены в aq_schema
+        - Все интерфейсы сервисов в aq_schema
+        - Пакет ИСПОЛЬЗУЕТ типы из aq_schema, не дублирует их
+      </implications>
+      <in_practice>
+        При работе с пакетом:
+        1. Читать интерфейсы из aq_schema
+        2. Реализовывать их в пакете
+        3. НЕ создавать свои версии типов
+      </in_practice>
+    </rule>
+    
+    <rule id="package_structure">
+      <principle>Единая структура для всех пакетов</principle>
+      <structure>
+        my_package/
+        ├── lib/
+        │   ├── my_package.dart              # ТОЛЬКО клиент
+        │   ├── client/                      # Клиентская часть
+        │   ├── server/                      # Серверная часть (НЕ в main export)
+        │   └── server.dart                  # Отдельный export для сервера
+        ├── test/
+        │   ├── integration/
+        │   └── unit/
+        └── pubspec.yaml
+      </structure>
+      <enforcement>
+        При создании файлов проверять соответствие структуре
+      </enforcement>
+    </rule>
+    
+    <rule id="export_separation">
+      <principle>Разделение клиентского и серверного экспорта</principle>
+      <rules>
+        - lib/{package}.dart экспортирует ТОЛЬКО client/
+        - lib/server.dart экспортирует server/
+        - Storage реализации ТОЛЬКО в server/, никогда в client/
+      </rules>
+      <check>
+        Перед добавлением export в main файл:
+        "Это клиентский код? Если нет — в server.dart"
+      </check>
+    </rule>
+    
+    <rule id="no_cross_package_deps">
+      <principle>Пакеты не зависят друг от друга</principle>
+      <forbidden>
+        import 'package:other_aq_package/...'  # ЗАПРЕЩЕНО
+      </forbidden>
+      <allowed>
+        import 'package:aq_schema/...'         # РАЗРЕШЕНО
+      </allowed>
+      <rationale>
+        Все взаимодействие через интерфейсы из aq_schema.
+        Пакеты изолированы и независимы.
+      </rationale>
+    </rule>
+    
+    <rule id="typed_clients">
+      <principle>Типизированные клиенты для разных потребителей</principle>
+      <pattern>
+        Один сервис → несколько клиентских интерфейсов:
+        - IAQAuthUserClient      (для UI)
+        - IAQAuthResourceClient  (для воркеров)
+        - IAQAuthAdminClient     (для админов)
+        - IAQAuthEngineClient    (для движка)
+      </pattern>
+      <implementation>
+        При создании клиента в пакете:
+        1. Определить типы потребителей
+        2. Создать отдельный интерфейс для каждого
+        3. Реализовать с разными уровнями доступа
+      </implementation>
+    </rule>
+    
+  </architecture_rules>
+  
+  <!-- ============================================ -->
+  <!-- ПАТТЕРНЫ РАБОТЫ -->
+  <!-- ============================================ -->
+  
+  <patterns>
+    
+    <pattern name="reading_aq_schema">
+      <when>Нужно понять интерфейс из aq_schema</when>
+      <steps>
+        1. code search_symbols: найти интерфейс
+        2. code lookup_symbols: получить полное определение
+        3. Понять контракт
+        4. Реализовать в текущем пакете
+      </steps>
+      <never>
+        - Не копировать код из aq_schema
+        - Не "исправлять" интерфейсы
+        - Не создавать свои версии
+      </never>
+    </pattern>
+    
+    <pattern name="reading_other_packages">
+      <when>Нужно понять как реализован паттерн</when>
+      <steps>
+        1. fs_read из другого пакета (только чтение!)
+        2. Понять паттерн
+        3. Адаптировать паттерн для текущего пакета
+        4. Написать свою реализацию в текущем пакете
+      </steps>
+      <never>
+        - Не копировать код напрямую
+        - Не изменять другой пакет
+        - Не создавать зависимость
+      </never>
+    </pattern>
+    
+    <pattern name="implementing_interface">
+      <when>Реализация интерфейса из aq_schema</when>
+      <steps>
+        1. Прочитать интерфейс из aq_schema
+        2. Создать класс в client/ или server/ текущего пакета
+        3. Реализовать все методы интерфейса
+        4. Добавить в соответствующий export файл
+      </steps>
+      <example>
+        // aq_schema/clients.dart
+        abstract interface class IAQVaultClient {
+          Future&lt;void&gt; write(String key, dynamic value);
+        }
+        
+        // current_package/lib/client/vault_client.dart
+        class VaultClient implements IAQVaultClient {
+          @override
+          Future&lt;void&gt; write(String key, dynamic value) {
+            // реализация
+          }
+        }
+        
+        // current_package/lib/my_package.dart
+        export 'client/vault_client.dart';
+      </example>
+    </pattern>
+    
+    <pattern name="creating_new_file">
+      <when>Нужно создать новый файл в пакете</when>
+      <checklist>
+        ☐ Путь внутри CURRENT_PACKAGE
+        ☐ Соответствует структуре (lib/client/, lib/server/, test/)
+        ☐ Имя файла snake_case
+        ☐ Если клиентский код → будет экспортирован из main файла
+        ☐ Если серверный код → будет экспортирован из server.dart
+      </checklist>
+    </pattern>
+    
+  </patterns>
+  
+  <!-- ============================================ -->
+  <!-- ПРИМЕРЫ ПРАВИЛЬНОГО И НЕПРАВИЛЬНОГО -->
+  <!-- ============================================ -->
+  
+  <examples>
+    
+    <example type="correct" scenario="implementing_client">
+      <description>Реализация клиента в текущем пакете</description>
+      <current_package>pkgs/my_vault</current_package>
+      <actions>
+        1. Читаю интерфейс: aq_schema/clients.dart → IAQVaultClient
+        2. Создаю: pkgs/my_vault/lib/client/vault_client.dart
+        3. Реализую IAQVaultClient
+        4. Экспортирую: pkgs/my_vault/lib/my_vault.dart
+      </actions>
+      <why_correct>
+        Все изменения внутри текущего пакета.
+        aq_schema только читается.
+      </why_correct>
+    </example>
+    
+    <example type="incorrect" scenario="modifying_aq_schema">
+      <description>Попытка изменить интерфейс в aq_schema</description>
+      <current_package>pkgs/my_vault</current_package>
+      <attempted_action>
+        fs_write: aq_schema/clients.dart
+        (добавить метод в IAQVaultClient)
+      </attempted_action>
+      <why_incorrect>
+        aq_schema — справочник, нельзя изменять в контексте пакета
+      </why_incorrect>
+      <correct_approach>
+        1. Работать с существующим интерфейсом
+        2. Если интерфейс неполный — отметить в комментарии
+        3. Изменение aq_schema — отдельная сессия
+      </correct_approach>
+    </example>
+    
+    <example type="incorrect" scenario="modifying_other_package">
+      <description>Попытка исправить баг в другом пакете</description>
+      <current_package>pkgs/my_vault</current_package>
+      <attempted_action>
+        fs_write: pkgs/aq_auth/lib/client/auth_client.dart
+        (исправить баг)
+      </attempted_action>
+      <why_incorrect>
+        Другие пакеты — справочные, нельзя изменять
+      </why_incorrect>
+      <correct_approach>
+        1. Отметить баг в комментарии/issue
+        2. Продолжить работу с текущим пакетом
+        3. Исправление бага — отдельная сессия с aq_auth как текущим
+      </correct_approach>
+    </example>
+    
+    <example type="correct" scenario="learning_from_other_package">
+      <description>Изучение паттерна из другого пакета</description>
+      <current_package>pkgs/my_new_package</current_package>
+      <actions>
+        1. fs_read: pkgs/dart_vault/lib/client/vault_client.dart
+        2. Понимаю паттерн handshake
+        3. fs_write: pkgs/my_new_package/lib/client/my_client.dart
+        4. Пишу свою реализацию handshake
+      </actions>
+      <why_correct>
+        Читаю другой пакет для понимания.
+        Пишу в текущий пакет.
+        Не копирую код, адаптирую паттерн.
+      </why_correct>
+    </example>
+    
+  </examples>
+  
+  <!-- ============================================ -->
+  <!-- САМОПРОВЕРКА -->
+  <!-- ============================================ -->
+  
+  <self_check>
+    <before_any_write>
+      <questions>
+        1. Путь внутри CURRENT_PACKAGE? (да/нет)
+        2. Это НЕ aq_schema? (да/нет)
+        3. Это НЕ другой пакет? (да/нет)
+      </questions>
+      <if_any_no>
+        STOP. Пересмотреть действие.
+      </if_any_no>
+    </before_any_write>
+    
+    <periodic_check>
+      <frequency>Каждые 5 операций fs_write</frequency>
+      <question>
+        "Все изменения в этой сессии — внутри {CURRENT_PACKAGE}?"
+      </question>
+      <if_no>
+        CRITICAL ERROR. Откатить неправильные изменения.
+      </if_no>
+    </periodic_check>
+  </self_check>
+  
+  <!-- ============================================ -->
+  <!-- СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЮ -->
+  <!-- ============================================ -->
+  
+  <user_messages>
+    
+    <on_session_start>
+      "📦 Текущий пакет: {package_name}
+      📁 Scope: {CURRENT_PACKAGE}/
+      📖 aq_schema и другие пакеты — только для чтения
+      ✅ Готов к работе"
+    </on_session_start>
+    
+    <on_scope_violation>
+      "❌ НАРУШЕНИЕ SCOPE
+      Текущий пакет: {CURRENT_PACKAGE}
+      Попытка изменить: {attempted_path}
+      
+      Это нарушает архитектурные правила.
+      Изменения разрешены только внутри текущего пакета."
+    </on_scope_violation>
+    
+    <on_aq_schema_write_attempt>
+      "❌ ЗАПРЕЩЕНО: Изменение aq_schema
+      
+      aq_schema — единый источник истины для всех пакетов.
+      Его изменение требует отдельной сессии с полным пониманием
+      влияния на ВСЮ экосистему.
+      
+      В текущей сессии aq_schema — только для чтения."
+    </on_aq_schema_write_attempt>
+    
+    <on_other_package_write_attempt>
+      "❌ ЗАПРЕЩЕНО: Изменение другого пакета
+      
+      Текущий пакет: {CURRENT_PACKAGE}
+      Попытка изменить: {other_package}
+      
+      Пакеты изолированы. Для изменения другого пакета
+      нужно начать новую сессию с ним как текущим."
+    </on_other_package_write_attempt>
+    
+  </user_messages>
+  
+</package_work_rules>

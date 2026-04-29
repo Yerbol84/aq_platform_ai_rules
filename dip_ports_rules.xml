@@ -1,0 +1,528 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dip_ports_rules version="1.0">
+
+  <!--
+    Правила Dependency Inversion через порты и синглтоны.
+
+    Суть:
+      Пакет A не должен знать о пакете B.
+      Пакет A объявляет ЧТО ему нужно (порт-интерфейс в aq_schema).
+      Пакет B реализует этот порт.
+      Приложение (точка сборки) соединяет их через инициализацию синглтона.
+
+    Аналогия:
+      Розетка (порт) — стандарт, не знает о конкретном приборе.
+      Прибор (реализация) — не знает о других приборах.
+      Электрик (приложение) — подключает нужный прибор к нужной розетке.
+  -->
+
+  <!-- ============================================ -->
+  <!-- КЛЮЧЕВЫЕ ПРИНЦИПЫ -->
+  <!-- ============================================ -->
+
+  <core_principles>
+
+    <principle id="schema_owns_ports">
+      <title>aq_schema владеет всеми портами</title>
+      <rule>
+        Каждый интерфейс-порт живёт в aq_schema.
+        Пакеты зависят ТОЛЬКО от aq_schema, не друг от друга.
+      </rule>
+      <dependency_graph>
+        aq_schema ← aq_tool_runtime (implements)
+        aq_schema ← aq_sandbox (implements)
+        aq_schema ← aq_subject_runtime (implements)
+        aq_schema ← aq_mcp (implements)
+        aq_example_app → все пакеты (точка сборки)
+      </dependency_graph>
+      <forbidden>
+        aq_mcp → aq_tool_runtime     ❌ прямая зависимость
+        aq_subject_runtime → aq_tool_runtime  ❌ прямая зависимость
+        aq_subject_registry → aq_sandbox      ❌ прямая зависимость
+      </forbidden>
+    </principle>
+
+    <principle id="singleton_pattern">
+      <title>Синглтон через статику интерфейса</title>
+      <rule>
+        Каждый порт-интерфейс в aq_schema содержит статический синглтон.
+        Инициализируется ОДИН РАЗ в приложении (точке сборки).
+        Используется везде через InterfaceName.instance.
+      </rule>
+      <pattern>
+        <code><![CDATA[
+// aq_schema/lib/tools/interfaces/i_tool_handler_registry.dart
+abstract interface class IToolHandlerRegistry {
+  // Синглтон — инициализируется в приложении
+  static IToolHandlerRegistry? _instance;
+
+  static IToolHandlerRegistry get instance {
+    assert(_instance != null, 'IToolHandlerRegistry not initialized. '
+        'Call IToolHandlerRegistry.initialize() in main().');
+    return _instance!;
+  }
+
+  static void initialize(IToolHandlerRegistry impl) => _instance = impl;
+  static void reset() => _instance = null; // для тестов
+
+  // Контракт — ЧТО нужно, не КАК делать
+  void registerHandler(String name, IToolHandler handler);
+  Future<ToolOutput> execute(ToolContract contract, ToolInput input);
+}
+        ]]></code>
+      </pattern>
+      <initialization_in_app>
+        <code><![CDATA[
+// aq_example_app/bin/main.dart — точка сборки
+void main() async {
+  // Создаём реализации
+  final toolRuntime = ToolRuntime(sandboxProvider);
+
+  // Регистрируем синглтоны
+  IToolHandlerRegistry.initialize(toolRuntime);
+  ISandboxProvider.initialize(sandboxProvider);
+
+  // Теперь любой пакет может использовать:
+  // IToolHandlerRegistry.instance.registerHandler(...)
+}
+        ]]></code>
+      </initialization_in_app>
+    </principle>
+
+    <principle id="port_defines_need_not_how">
+      <title>Порт описывает потребность, не реализацию</title>
+      <rule>
+        Интерфейс-порт говорит ЧТО нужно сделать.
+        Реализация сама решает КАК это сделать.
+        Порт не должен диктовать внутреннюю структуру реализации.
+      </rule>
+      <example_correct>
+        <code><![CDATA[
+// ✅ Порт описывает потребность
+abstract interface class IToolHandlerRegistry {
+  void registerHandler(String name, IToolHandler handler);
+  Future<ToolOutput> execute(ToolContract contract, ToolInput input);
+  // Не знает о CircuitBreaker, Sandbox, workDir — это детали реализации
+}
+        ]]></code>
+      </example_correct>
+      <example_incorrect>
+        <code><![CDATA[
+// ❌ Порт диктует реализацию
+abstract interface class IToolHandlerRegistry {
+  void registerHandler(
+    String name,
+    IToolHandler handler,
+    {CircuitBreakerConfig? circuit}  // ❌ Деталь реализации в порту
+  );
+}
+        ]]></code>
+      </example_incorrect>
+    </principle>
+
+    <principle id="app_is_assembly_point">
+      <title>Приложение — единственная точка сборки</title>
+      <rule>
+        Только приложение (aq_example_app, main.dart) знает обо всех пакетах.
+        Только приложение создаёт конкретные реализации.
+        Только приложение вызывает Interface.initialize(impl).
+        Пакеты не создают реализации других пакетов.
+      </rule>
+      <what_app_does>
+        1. Импортирует все нужные пакеты
+        2. Создаёт конкретные реализации (ToolRuntime, SandboxProvider, etc.)
+        3. Инициализирует синглтоны через Interface.initialize()
+        4. Запускает логику
+      </what_app_does>
+    </principle>
+
+  </core_principles>
+
+  <!-- ============================================ -->
+  <!-- КАРТА ПОРТОВ -->
+  <!-- ============================================ -->
+
+  <ports_map>
+
+    <!--
+      Для каждого взаимодействия между пакетами:
+      1. Определить что нужно (минимальный контракт)
+      2. Создать порт в aq_schema
+      3. Реализовать в нужном пакете
+      4. Инициализировать в приложении
+    -->
+
+    <port id="tool_handler_registry">
+      <lives_in>aq_schema/lib/tools/interfaces/i_tool_handler_registry.dart</lives_in>
+      <needed_by>aq_mcp (McpRegistrar регистрирует handlers)</needed_by>
+      <implemented_by>aq_tool_runtime (ToolRuntime)</implemented_by>
+      <contract>
+        registerHandler(String name, IToolHandler handler)
+        execute(ToolContract contract, ToolInput input)
+      </contract>
+      <status>TODO — нужно создать</status>
+    </port>
+
+    <port id="subject_session_factory">
+      <lives_in>aq_schema/lib/subject/interfaces/i_subject_session_factory.dart</lives_in>
+      <needed_by>aq_subject_registry (createSession создаёт сессии)</needed_by>
+      <implemented_by>aq_subject_runtime (SubjectSessionFactory)</implemented_by>
+      <contract>
+        createSession(SubjectDescriptor, RunContext, ISandboxHandle, IToolExecutor?)
+            → ISubjectSession
+      </contract>
+      <status>TODO — нужно создать</status>
+    </port>
+
+    <port id="sandbox_provider">
+      <lives_in>aq_schema/lib/sandbox/interfaces/i_sandbox_provider.dart</lives_in>
+      <needed_by>aq_subject_registry, aq_tool_runtime, aq_mcp</needed_by>
+      <implemented_by>aq_sandbox (SandboxProvider)</implemented_by>
+      <contract>
+        create(SandboxSpec) → ISandboxHandle
+        get(String sandboxId) → ISandboxHandle?
+      </contract>
+      <status>DONE — уже есть в aq_schema, но без синглтона</status>
+    </port>
+
+    <port id="tool_runtime_executor">
+      <lives_in>aq_schema/lib/tools/interfaces/i_tool_runtime_executor.dart</lives_in>
+      <needed_by>aq_subject_runtime (RestrictedToolExecutor вызывает execute)</needed_by>
+      <implemented_by>aq_tool_runtime (ToolRuntime)</implemented_by>
+      <contract>
+        execute(ToolContract contract, ToolInput input) → ToolOutput
+      </contract>
+      <status>DONE — уже создан</status>
+    </port>
+
+    <port id="llm_protocol_keys">
+      <lives_in>aq_schema/lib/tools/constants/llm_tool_keys.dart</lives_in>
+      <needed_by>aq_subject_runtime (LlmAgentExecutor использует ключи)</needed_by>
+      <currently_in>aq_tool_runtime — НЕПРАВИЛЬНО</currently_in>
+      <status>TODO — перенести в aq_schema</status>
+    </port>
+
+  </ports_map>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛА СОЗДАНИЯ ПОРТА -->
+  <!-- ============================================ -->
+
+  <port_creation_rules>
+
+    <rule id="minimal_contract">
+      <title>Минимальный контракт</title>
+      <rule>
+        Порт содержит только то что нужно потребителю.
+        Не больше. Детали реализации — в реализующем пакете.
+      </rule>
+      <checklist>
+        ☐ Каждый метод — реальная потребность потребителя
+        ☐ Нет параметров специфичных для конкретной реализации
+        ☐ Нет импортов из реализующих пакетов
+        ☐ Только типы из aq_schema
+      </checklist>
+    </rule>
+
+    <rule id="singleton_required">
+      <title>Синглтон обязателен</title>
+      <rule>
+        Каждый порт-интерфейс содержит статический синглтон.
+        Паттерн одинаковый для всех портов.
+      </rule>
+      <template>
+        <code><![CDATA[
+abstract interface class IMyPort {
+  static IMyPort? _instance;
+
+  static IMyPort get instance {
+    assert(_instance != null, 'IMyPort not initialized.');
+    return _instance!;
+  }
+
+  static void initialize(IMyPort impl) => _instance = impl;
+  static void reset() => _instance = null;
+
+  // методы контракта...
+}
+        ]]></code>
+      </template>
+    </rule>
+
+    <rule id="location">
+      <title>Расположение</title>
+      <rule>
+        Порты живут в aq_schema в соответствующем домене:
+        - tools/interfaces/ — для tool-related портов
+        - sandbox/interfaces/ — для sandbox-related портов
+        - subject/interfaces/ — для subject-related портов
+        Экспортируются из barrel файла домена (tools.dart, sandbox.dart, subject.dart).
+      </rule>
+    </rule>
+
+  </port_creation_rules>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛА ИСПОЛЬЗОВАНИЯ ПОРТА -->
+  <!-- ============================================ -->
+
+  <port_usage_rules>
+
+    <rule id="always_via_instance">
+      <title>Всегда через .instance</title>
+      <rule>
+        Пакет использует порт только через IMyPort.instance.
+        Никогда не принимает конкретную реализацию в конструктор.
+      </rule>
+      <correct>
+        <code><![CDATA[
+// ✅ Через синглтон
+class McpRegistrar {
+  Future<void> register(McpServerConfig config) async {
+    // Не знает о ToolRuntime — только о порту
+    IToolHandlerRegistry.instance.registerHandler(name, handler);
+  }
+}
+        ]]></code>
+      </correct>
+      <incorrect>
+        <code><![CDATA[
+// ❌ Конкретная реализация в конструкторе
+class McpRegistrar {
+  final ToolRuntime _toolRuntime; // ❌ Конкретный класс
+  McpRegistrar(this._toolRuntime);
+}
+        ]]></code>
+      </incorrect>
+      <exception>
+        <title>Исключение: приложение (точка сборки)</title>
+        <rule>
+          Только приложение создаёт конкретные реализации и передаёт их в initialize().
+          Это единственное место где допустимо знать о конкретных классах.
+        </rule>
+      </exception>
+    </rule>
+
+    <rule id="no_cross_package_imports">
+      <title>Нет импортов между пакетами</title>
+      <rule>
+        Пакет импортирует ТОЛЬКО aq_schema.
+        Никаких import 'package:other_aq_package/...'.
+      </rule>
+      <allowed>
+        import 'package:aq_schema/tools.dart';    ✅
+        import 'package:aq_schema/sandbox.dart';  ✅
+        import 'package:aq_schema/subject.dart';  ✅
+      </allowed>
+      <forbidden>
+        import 'package:aq_tool_runtime/...';     ❌
+        import 'package:aq_sandbox/...';          ❌
+        import 'package:aq_subject_runtime/...';  ❌
+      </forbidden>
+    </rule>
+
+  </port_usage_rules>
+
+  <!-- ============================================ -->
+  <!-- ПЛАН ИСПРАВЛЕНИЯ ТЕКУЩИХ НАРУШЕНИЙ -->
+  <!-- ============================================ -->
+
+  <fix_plan>
+
+    <violation id="v1">
+      <description>LlmToolKeys живёт в aq_tool_runtime, используется в aq_subject_runtime</description>
+      <fix>
+        1. Перенести LlmToolKeys в aq_schema/lib/tools/constants/llm_tool_keys.dart
+        2. Экспортировать из tools.dart barrel
+        3. Обновить импорты в aq_subject_runtime и aq_tool_runtime
+        4. Убрать зависимость aq_subject_runtime → aq_tool_runtime из pubspec
+      </fix>
+    </violation>
+
+    <violation id="v2">
+      <description>McpRegistrar принимает ToolRuntime напрямую (aq_mcp → aq_tool_runtime)</description>
+      <fix>
+        1. Создать IToolHandlerRegistry в aq_schema (с синглтоном)
+        2. ToolRuntime implements IToolHandlerRegistry
+        3. McpRegistrar использует IToolHandlerRegistry.instance
+        4. Убрать aq_tool_runtime из pubspec aq_mcp
+        5. Убрать CircuitBreakerConfig из McpRegistrar (деталь реализации)
+      </fix>
+    </violation>
+
+    <violation id="v3">
+      <description>aq_subject_registry зависит от aq_subject_runtime и aq_sandbox</description>
+      <fix>
+        1. Создать ISubjectSessionFactory в aq_schema (с синглтоном)
+        2. SubjectSessionFactory в aq_subject_runtime implements ISubjectSessionFactory
+        3. SubjectRegistryClient использует ISubjectSessionFactory.instance
+        4. ISandboxProvider уже есть — добавить синглтон
+        5. Убрать aq_subject_runtime и aq_sandbox из pubspec aq_subject_registry
+      </fix>
+    </violation>
+
+    <violation id="v4">
+      <description>ISandboxProvider существует но без синглтона</description>
+      <fix>
+        Добавить статический синглтон в ISandboxProvider по стандартному паттерну.
+      </fix>
+    </violation>
+
+  </fix_plan>
+
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ ДЛЯ AI -->
+  <!-- ============================================ -->
+
+  <ai_checklist>
+
+    <before_adding_dependency>
+      <question>Нужен ли мне другой AQ пакет?</question>
+      <if_yes>
+        СТОП. Вместо зависимости:
+        1. Определить что именно нужно (минимальный контракт)
+        2. Проверить есть ли уже порт в aq_schema
+        3. Если нет — создать порт в aq_schema
+        4. Использовать через IMyPort.instance
+        5. Инициализацию добавить в приложение
+      </if_yes>
+    </before_adding_dependency>
+
+    <before_creating_interface>
+      <questions>
+        ☐ Интерфейс в aq_schema (не в пакете)?
+        ☐ Есть статический синглтон (instance + initialize + reset)?
+        ☐ Контракт минимальный (только потребности, не детали)?
+        ☐ Нет типов из реализующих пакетов?
+        ☐ Экспортируется из barrel файла?
+      </questions>
+    </before_creating_interface>
+
+    <before_implementing_interface>
+      <questions>
+        ☐ Реализация в правильном пакете (не в aq_schema)?
+        ☐ Implements интерфейс из aq_schema?
+        ☐ Не диктует другим пакетам как работать?
+        ☐ Инициализация добавлена в приложение?
+      </questions>
+    </before_implementing_interface>
+
+    <pubspec_check>
+      <rule>
+        В pubspec пакета (кроме aq_example_app) допустимы только:
+        - aq_schema
+        - Внешние библиотеки (uuid, http, etc.)
+        НЕ допустимы:
+        - Другие aq_* пакеты
+      </rule>
+    </pubspec_check>
+
+  </ai_checklist>
+
+  <!-- ============================================ -->
+  <!-- ПРИМЕРЫ -->
+  <!-- ============================================ -->
+
+  <examples>
+
+    <example type="correct" name="mcp_uses_port">
+      <description>McpRegistrar через порт, без зависимости на aq_tool_runtime</description>
+      <code><![CDATA[
+// aq_schema/lib/tools/interfaces/i_tool_handler_registry.dart
+abstract interface class IToolHandlerRegistry {
+  static IToolHandlerRegistry? _instance;
+  static IToolHandlerRegistry get instance {
+    assert(_instance != null, 'IToolHandlerRegistry not initialized.');
+    return _instance!;
+  }
+  static void initialize(IToolHandlerRegistry impl) => _instance = impl;
+  static void reset() => _instance = null;
+
+  void registerHandler(String name, IToolHandler handler);
+  Future<ToolOutput> execute(ToolContract contract, ToolInput input);
+}
+
+// aq_tool_runtime/lib/src/tool_runtime.dart
+final class ToolRuntime implements IToolHandlerRegistry, IToolRuntimeExecutor {
+  @override
+  void registerHandler(String name, IToolHandler handler, ...) { ... }
+  @override
+  Future<ToolOutput> execute(ToolContract contract, ToolInput input) { ... }
+}
+
+// aq_mcp/lib/src/client/mcp_registrar.dart
+import 'package:aq_schema/tools.dart'; // ✅ Только aq_schema
+
+final class McpRegistrar {
+  // Не принимает ToolRuntime — использует порт
+  Future<List<String>> register(McpServerConfig config) async {
+    // ...
+    IToolHandlerRegistry.instance.registerHandler(toolName, handler); // ✅
+  }
+}
+
+// aq_example_app/bin/main.dart — точка сборки
+import 'package:aq_tool_runtime/aq_tool_runtime.dart'; // ✅ Только здесь
+import 'package:aq_mcp/aq_mcp.dart';
+
+void main() async {
+  final toolRuntime = ToolRuntime(sandboxProvider);
+  IToolHandlerRegistry.initialize(toolRuntime); // ✅ Инициализация синглтона
+
+  final registrar = McpRegistrar(); // Не нужен ToolRuntime в конструкторе
+  await registrar.register(config);
+}
+      ]]></code>
+    </example>
+
+    <example type="correct" name="subject_registry_uses_factory">
+      <description>SubjectRegistryClient через фабрику, без зависимости на aq_subject_runtime</description>
+      <code><![CDATA[
+// aq_schema/lib/subject/interfaces/i_subject_session_factory.dart
+abstract interface class ISubjectSessionFactory {
+  static ISubjectSessionFactory? _instance;
+  static ISubjectSessionFactory get instance { ... }
+  static void initialize(ISubjectSessionFactory impl) => _instance = impl;
+  static void reset() => _instance = null;
+
+  ISubjectSession createSession({
+    required SubjectDescriptor descriptor,
+    required RunContext context,
+    required ISandboxHandle sandbox,
+    IToolExecutor? toolExecutor,
+  });
+}
+
+// aq_subject_runtime — реализует фабрику
+final class SubjectSessionFactory implements ISubjectSessionFactory {
+  @override
+  ISubjectSession createSession({...}) => SubjectSession(...);
+}
+
+// aq_subject_registry — использует только порты
+final class SubjectRegistryClient implements IAQSubjectRegistry {
+  // Не зависит от aq_subject_runtime или aq_sandbox
+  @override
+  Future<ISubjectSession> createSession(String id, SessionConfig config) async {
+    final sandbox = await ISandboxProvider.instance.create(spec);
+    final context = await sandbox.createContext(...);
+    return ISubjectSessionFactory.instance.createSession(
+      descriptor: descriptor,
+      context: context,
+      sandbox: sandbox,
+    );
+  }
+}
+
+// aq_example_app — точка сборки
+void main() async {
+  ISandboxProvider.initialize(SandboxProvider('playground'));
+  ISubjectSessionFactory.initialize(SubjectSessionFactory());
+  IToolHandlerRegistry.initialize(ToolRuntime(ISandboxProvider.instance));
+}
+      ]]></code>
+    </example>
+
+  </examples>
+
+</dip_ports_rules>
