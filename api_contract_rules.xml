@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<api_contract_rules version="1.0">
+
+  <!--
+    Правила API Contract Pattern.
+    Источник: aq_schema/doc/API_CONTRACT_PATTERN.md
+
+    Суть:
+      Маршруты HTTP определяются ОДИН РАЗ в aq_schema.
+      Клиент и сервер используют один контракт — нет рассинхронизации.
+      Нет магических строк. Нет 404 из-за опечаток.
+  -->
+
+  <!-- ============================================ -->
+  <!-- ОСНОВНОЙ ПРИНЦИП -->
+  <!-- ============================================ -->
+
+  <core_principle>
+    <rule>НИКОГДА не хардкодить HTTP маршруты в клиенте или сервере</rule>
+    <rule>Все маршруты определяются в классе *ApiContract в aq_schema</rule>
+    <rule>Клиент и сервер используют один и тот же контракт</rule>
+    <pattern>/{apiVersion}{basePath}/{route}</pattern>
+    <example>POST /v1/vault/handshake</example>
+  </core_principle>
+
+  <!-- ============================================ -->
+  <!-- СТРУКТУРА КОНТРАКТА -->
+  <!-- ============================================ -->
+
+  <contract_structure>
+    <location>aq_schema/lib/{service}/api_contract/</location>
+    <files>
+      <file>{service}_api_contract.dart — определение маршрутов</file>
+      <file>{service}_api_route_builder.dart — типобезопасный builder URL</file>
+    </files>
+
+    <contract_template>
+      <code><![CDATA[
+// aq_schema/lib/{service}/api_contract/{service}_api_contract.dart
+class VaultApiContract implements IAqApiContract {
+  const VaultApiContract();
+
+  @override
+  String get apiVersion => 'v1';
+
+  @override
+  String get basePath => '/vault';
+
+  @override
+  Map<String, RouteSpec> get routes => {
+    'handshake': const RouteSpec(
+      path: '/handshake',
+      method: 'POST',
+      description: 'Connection handshake',
+      requiresAuth: false,
+    ),
+    'rpc': const RouteSpec(
+      path: '/rpc',
+      method: 'POST',
+      description: 'Repository operations',
+      requiresAuth: true,
+    ),
+    'health': const RouteSpec(
+      path: '/health',
+      method: 'GET',
+      description: 'Health check',
+      requiresAuth: false,
+    ),
+  };
+
+  // Константы маршрутов — не хардкодить строки снаружи
+  static const String routeHandshake = 'handshake';
+  static const String routeRpc = 'rpc';
+  static const String routeHealth = 'health';
+}
+      ]]></code>
+    </contract_template>
+
+    <builder_template>
+      <code><![CDATA[
+// aq_schema/lib/{service}/api_contract/{service}_api_route_builder.dart
+class VaultApiRouteBuilder implements IAqApiRouteBuilder {
+  @override final VaultApiContract contract;
+  @override final String baseUrl;
+
+  const VaultApiRouteBuilder(this.contract, this.baseUrl);
+
+  String handshake() => contract.buildUrl(baseUrl, VaultApiContract.routeHandshake);
+  String rpc()       => contract.buildUrl(baseUrl, VaultApiContract.routeRpc);
+  String health()    => contract.buildUrl(baseUrl, VaultApiContract.routeHealth);
+}
+      ]]></code>
+    </builder_template>
+  </contract_structure>
+
+  <!-- ============================================ -->
+  <!-- ИСПОЛЬЗОВАНИЕ В КЛИЕНТЕ -->
+  <!-- ============================================ -->
+
+  <client_usage>
+    <rule>Клиент создаёт экземпляр контракта и использует builder для URL</rule>
+    <correct><![CDATA[
+// ✅ ПРАВИЛЬНО
+import 'package:aq_schema/data.dart';
+
+class RemoteVaultStorage {
+  final VaultApiContract _contract = const VaultApiContract();
+  late final VaultApiRouteBuilder _routes;
+
+  RemoteVaultStorage(String baseUrl) {
+    _routes = _contract.createRouteBuilder(baseUrl);
+  }
+
+  Future<void> handshake() async {
+    final url = _routes.handshake(); // ✅ Типобезопасно
+    await http.post(Uri.parse(url), ...);
+  }
+}
+    ]]></correct>
+
+    <incorrect><![CDATA[
+// ❌ ЗАПРЕЩЕНО — хардкод маршрута
+Future<void> handshake() async {
+  final url = '$baseUrl/vault/handshake'; // ❌ Хардкод
+  await http.post(Uri.parse(url), ...);
+}
+    ]]></incorrect>
+  </client_usage>
+
+  <!-- ============================================ -->
+  <!-- ИСПОЛЬЗОВАНИЕ НА СЕРВЕРЕ -->
+  <!-- ============================================ -->
+
+  <server_usage>
+    <rule>Сервер использует contract.getFullRoute() для регистрации маршрутов</rule>
+    <correct><![CDATA[
+// ✅ ПРАВИЛЬНО
+import 'package:aq_schema/data.dart';
+
+void main() async {
+  final contract = VaultApiContract();
+
+  final router = Router()
+    ..post(contract.getFullRoute('handshake'), _handleHandshake)
+    ..post(contract.getFullRoute('rpc'), _handleRpc)
+    ..get(contract.getFullRoute('health'), _handleHealth);
+}
+    ]]></correct>
+
+    <incorrect><![CDATA[
+// ❌ ЗАПРЕЩЕНО — хардкод маршрута на сервере
+final router = Router()
+  ..post('/handshake', _handleHandshake)  // ❌ Не совпадёт с клиентом
+  ..post('/rpc', _handleRpc);
+    ]]></incorrect>
+  </server_usage>
+
+  <!-- ============================================ -->
+  <!-- ФОРМАТ ОТВЕТА СЕРВЕРА -->
+  <!-- ============================================ -->
+
+  <response_format>
+    <rule>Сервер ВСЕГДА оборачивает ответ в VaultRpcResponse формат</rule>
+
+    <success><![CDATA[
+// ✅ Успешный ответ
+return Response.ok(
+  jsonEncode({'success': true, 'data': result}),
+  headers: {'Content-Type': 'application/json'},
+);
+    ]]></success>
+
+    <error><![CDATA[
+// ✅ Ответ с ошибкой
+return Response.internalServerError(
+  body: jsonEncode({
+    'success': false,
+    'error': e.toString(),
+    'errorCode': 'STORAGE_ERROR',
+  }),
+  headers: {'Content-Type': 'application/json'},
+);
+    ]]></error>
+
+    <incorrect><![CDATA[
+// ❌ ЗАПРЕЩЕНО — сырые данные без обёртки
+return Response.ok(jsonEncode(entityData)); // ❌ Клиент не распарсит
+    ]]></incorrect>
+  </response_format>
+
+  <!-- ============================================ -->
+  <!-- ДОБАВЛЕНИЕ НОВОГО КОНТРАКТА -->
+  <!-- ============================================ -->
+
+  <new_contract_checklist>
+    <step number="1">Создать {service}_api_contract.dart в aq_schema/lib/{service}/api_contract/</step>
+    <step number="2">Создать {service}_api_route_builder.dart рядом</step>
+    <step number="3">Экспортировать из соответствующего barrel (aq_schema.dart или тематического)</step>
+    <step number="4">Обновить клиент — использовать builder вместо хардкода</step>
+    <step number="5">Обновить сервер — использовать contract.getFullRoute()</step>
+    <step number="6">Найти ВСЕ хардкоды маршрутов (grep!) и заменить</step>
+    <step number="7">Проверить end-to-end: клиент → сервер → БД</step>
+  </new_contract_checklist>
+
+  <!-- ============================================ -->
+  <!-- ПОИСК ХАРДКОДОВ (КРИТИЧНО) -->
+  <!-- ============================================ -->
+
+  <hardcode_detection>
+    <rule>
+      Создание контракта — только 50% работы.
+      Вторые 50% — найти и заменить ВСЕ хардкоды.
+    </rule>
+    <grep_commands><![CDATA[
+# Найти все хардкоды маршрутов
+grep -r "'/handshake'" .
+grep -r "'/rpc'" .
+grep -r "'/health'" .
+grep -r '"/vault/' .
+grep -r '\$endpoint/' .
+grep -r '\$baseUrl/' .
+grep -r '\$url/' .
+    ]]></grep_commands>
+    <files_to_check>
+      - Клиентские storage реализации
+      - Серверные route handlers (main.dart)
+      - Тестовые файлы (*_test.dart)
+      - Примеры (example/*/main.dart)
+    </files_to_check>
+  </hardcode_detection>
+
+  <!-- ============================================ -->
+  <!-- СУЩЕСТВУЮЩИЕ КОНТРАКТЫ -->
+  <!-- ============================================ -->
+
+  <existing_contracts>
+    <contract service="Vault Data Service" status="implemented">
+      <file>aq_schema/lib/data_layer/api_contract/vault_api_contract.dart</file>
+      <routes>POST /v1/vault/handshake, POST /v1/vault/rpc, GET /v1/vault/health, GET /v1/vault/watch</routes>
+    </contract>
+    <contract service="Auth Service" status="TODO"/>
+    <contract service="MCP Adapter" status="TODO"/>
+    <contract service="Queue Service" status="TODO"/>
+    <contract service="Graph Worker" status="TODO"/>
+  </existing_contracts>
+
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ ДЛЯ AI -->
+  <!-- ============================================ -->
+
+  <ai_checklist>
+
+    <before_writing_http_route>
+      <question>Есть ли уже ApiContract для этого сервиса?</question>
+      <if_yes>Использовать contract.getFullRoute() или _routes.methodName()</if_yes>
+      <if_no>Создать контракт в aq_schema, потом использовать</if_no>
+    </before_writing_http_route>
+
+    <before_writing_url_string>
+      <trigger>Любая строка вида '$baseUrl/...' или '/v1/...'</trigger>
+      <action>СТОП. Заменить на contract.buildUrl() или _routes.method()</action>
+    </before_writing_url_string>
+
+    <after_creating_contract>
+      <checklist>
+        ☐ Grep на хардкоды маршрутов во всём проекте
+        ☐ Клиент использует builder
+        ☐ Сервер использует getFullRoute()
+        ☐ Тесты обновлены
+        ☐ Примеры обновлены
+        ☐ Сервер оборачивает ответы в {success, data}
+      </checklist>
+    </after_creating_contract>
+
+  </ai_checklist>
+
+</api_contract_rules>

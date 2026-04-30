@@ -1,0 +1,306 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<flutter_ui_model_rules version="1.0">
+
+  <!--
+    Правила Flutter UI Model Layer (AQ Studio).
+    Источник: /my_dir/ai_work/doc/AQ_ARCHITECTURE_RULES.md v1.0
+    Область: lib/core/ui/model/ и смежные слои.
+    Статус: ОБЯЗАТЕЛЬНО. Нарушение = ошибка архитектуры.
+  -->
+
+  <!-- ============================================ -->
+  <!-- СЛОЕВАЯ АРХИТЕКТУРА -->
+  <!-- ============================================ -->
+
+  <layer_architecture>
+    <layers>
+      <layer name="Flutter Layer" path="lib/core/ui/builder/, lib/ui/">
+        Знает о: Model Layer. Строит виджеты из моделей.
+      </layer>
+      <layer name="Model Layer" path="lib/core/ui/model/">
+        Знает о: ничего выше. Только чистый Dart. БЕЗ Flutter.
+      </layer>
+      <layer name="Data Layer" path="lib/data/">
+        Знает о: ничего выше. JSON, БД, Protocol.
+      </layer>
+    </layers>
+
+    <absolute_law id="no_flutter_in_model">
+      <title>Model Layer НИКОГДА не импортирует Flutter</title>
+      <forbidden_imports>
+        import 'package:flutter/material.dart';
+        import 'package:flutter/widgets.dart';
+        import 'package:flutter/foundation.dart';
+      </forbidden_imports>
+      <reason>Модели должны быть тестируемы без Flutter, переносимы, понятны как чистые данные.</reason>
+    </absolute_law>
+
+    <absolute_law id="no_toWidget_in_model">
+      <title>Метод toWidget() не существует в Model Layer</title>
+      <rule>AqElement и его наследники НЕ имеют метода toWidget()</rule>
+      <rule>Построение виджетов — задача Builder Layer</rule>
+    </absolute_law>
+
+    <absolute_law id="builder_uses_interface">
+      <title>Builder Layer работает только через интерфейс AqElement</title>
+      <rule>Не читать Map properties напрямую — только типизированные поля</rule>
+      <rule>Конкретные типы — только через явный cast (as ColumnElement)</rule>
+    </absolute_law>
+  </layer_architecture>
+
+  <!-- ============================================ -->
+  <!-- ЗАПРЕЩЁННЫЕ ТИПЫ В MODEL LAYER -->
+  <!-- ============================================ -->
+
+  <forbidden_types>
+    <title>Flutter-типы запрещены в lib/core/ui/model/</title>
+
+    <type forbidden="Color" replace_with="String? — семантический токен ('primary', 'danger', null)"/>
+    <type forbidden="Colors.blue" replace_with="строка 'primary'"/>
+    <type forbidden="MainAxisAlignment" replace_with="String ('start','center','end','spaceBetween','spaceAround','spaceEvenly')"/>
+    <type forbidden="CrossAxisAlignment" replace_with="String ('start','center','end','stretch','baseline')"/>
+    <type forbidden="MainAxisSize" replace_with="String ('min','max')"/>
+    <type forbidden="TextAlign" replace_with="String ('left','center','right','justify')"/>
+    <type forbidden="TextOverflow" replace_with="String ('clip','ellipsis','fade','visible')"/>
+    <type forbidden="TextStyle" replace_with="отдельные поля: String? textStyle, String? color, bool italic"/>
+    <type forbidden="FontWeight" replace_with="String ('normal','medium','semibold','bold')"/>
+    <type forbidden="EdgeInsets" replace_with="double — одно число для padding/margin"/>
+    <type forbidden="IconData" replace_with="String? — имя иконки ('star','home',null)"/>
+    <type forbidden="Widget" replace_with="запрещён полностью"/>
+    <type forbidden="ButtonStyle" replace_with="String? style, String? size"/>
+    <type forbidden="Gradient" replace_with="String? — CSS-нотация"/>
+    <type forbidden="BoxShadow" replace_with="String? — CSS-like описание"/>
+    <type forbidden="BoxBorder" replace_with="double borderWidth, String? borderColor"/>
+
+    <allowed_types>
+      - Примитивы Dart: String, int, double, bool
+      - Коллекции Dart: List&lt;T&gt;, Map&lt;String, T&gt;
+      - Dart enums определённые в том же пакете (не Flutter enums)
+      - AqElement и его наследники
+      - AqBaseProps, AqPropertyDef, миксины из lib/core/ui/model/mixins/
+    </allowed_types>
+  </forbidden_types>
+
+  <!-- ============================================ -->
+  <!-- ЦВЕТОВАЯ СИСТЕМА — СЕМАНТИЧЕСКИЕ ТОКЕНЫ -->
+  <!-- ============================================ -->
+
+  <color_system>
+    <rule>Все цвета в моделях — строки-токены. Никаких hex-кодов.</rule>
+    <tokens>
+      <token name="primary">Основной цвет приложения</token>
+      <token name="secondary">Вторичный цвет</token>
+      <token name="danger">Красный (ошибки, удаление)</token>
+      <token name="success">Зелёный (успех)</token>
+      <token name="warning">Оранжевый (предупреждения)</token>
+      <token name="surface">Цвет поверхности (карточки)</token>
+      <token name="background">Цвет фона</token>
+      <token name="onPrimary">Текст на primary-фоне</token>
+      <token name="onSurface">Текст на surface-фоне</token>
+      <token name="border">Цвет рамок</token>
+      <token name="null">Дефолт из темы приложения</token>
+    </tokens>
+    <resolution>
+      Преобразование String? → Color происходит ТОЛЬКО в lib/core/ui/builder/ui_tokens.dart
+      через UiTokens.resolveColor(ctx, token)
+    </resolution>
+  </color_system>
+
+  <!-- ============================================ -->
+  <!-- ИММУТАБЕЛЬНОСТЬ -->
+  <!-- ============================================ -->
+
+  <immutability>
+    <rule>Все поля в lib/core/ui/model/ — только final. Никаких late, var, сеттеров.</rule>
+
+    <copywith_sentinel>
+      <title>copyWith для nullable полей использует паттерн сентинеля</title>
+      <code><![CDATA[
+// Сентинель — top-level константа в aq_element.dart
+const _absent = Object();
+
+// В copyWith:
+ColumnElement copyWith({
+  Object? borderColor = _absent,  // nullable через Object?
+  String? id,                     // non-nullable — обычно
+}) {
+  return ColumnElement(
+    id: id ?? this.id,
+    borderColor: identical(borderColor, _absent)
+        ? this.borderColor          // не передавали → оставить
+        : borderColor as String?,   // передали (даже null) → применить
+  );
+}
+      ]]></code>
+      <reason>copyWith(borderColor: null) должен обнулить. copyWith() — оставить старый.</reason>
+    </copywith_sentinel>
+
+    <copywith_property>
+      <title>copyWithProperty — единственный способ обновления из PropertiesPanel</title>
+      <code><![CDATA[
+@override
+AqElement copyWithProperty(String key, dynamic value) {
+  return copyWith(
+    id: key == 'id' ? value as String : null,
+    borderColor: key == 'borderColor' ? value as String? : _absent,
+  );
+}
+      ]]></code>
+      <rule>Ключи совпадают с AqPropertyDef.key и с JSON props ключами</rule>
+    </copywith_property>
+  </immutability>
+
+  <!-- ============================================ -->
+  <!-- JSON PROTOCOL v2 -->
+  <!-- ============================================ -->
+
+  <json_protocol>
+    <rule>Поле type — всегда PascalCase: 'Column', 'Button', 'TextInput'</rule>
+    <rule>Все props идут в ключ 'props' (не 'properties')</rule>
+    <rule>Не записывать дефолтные значения — if (value != default) перед каждым</rule>
+    <rule>Цвет — строка-токен, не hex</rule>
+
+    <toJson_pattern><![CDATA[
+Map<String, dynamic> toJson() => {
+  'type': type,   // 'Column', 'Button' — PascalCase
+  'id': id,
+  'props': {
+    if (padding != 16.0) 'padding': padding,
+    if (borderColor != null) 'borderColor': borderColor,
+  },
+  if (base != AqBaseProps.defaults) 'base': base.toJson(),
+  if (children.isNotEmpty) 'children': children.map((c) => c.toJson()).toList(),
+  if (binding != null) 'binding': binding,
+  if (action != null) 'action': action!.toJson(),
+};
+    ]]></toJson_pattern>
+
+    <fromJson_pattern><![CDATA[
+// top-level функция в aq_element.dart — поддержка v1 и v2
+Map<String, dynamic> _readProps(Map<String, dynamic> json) {
+  final v2 = json['props'] as Map<String, dynamic>?;
+  if (v2 != null) return v2;
+  return (json['properties'] as Map<String, dynamic>?) ?? {};
+}
+    ]]></fromJson_pattern>
+
+    <registry_rule>
+      <rule>Типы в реестре — строго PascalCase, совпадают с type в JSON</rule>
+      <correct>AqElementRegistry.register('Column', ...);</correct>
+      <incorrect>AqElementRegistry.register('column', ...); // ← сломает legacy схемы</incorrect>
+    </registry_rule>
+  </json_protocol>
+
+  <!-- ============================================ -->
+  <!-- СТРУКТУРА AqElement -->
+  <!-- ============================================ -->
+
+  <aq_element_structure>
+    <base_class_has>
+      - String id
+      - String type
+      - AqBaseProps base
+      - List&lt;AqElement&gt; children
+      - abstract List&lt;AqPropertyDef&gt; get propertySchema
+      - abstract AqElement copyWithProperty(String key, dynamic value)
+      - abstract Map&lt;String, dynamic&gt; toJson()
+      - AqElement? findById(String targetId)
+      - AqElement updateById(String id, AqElement newElement)
+      - AqElement removeById(String id)
+      - AqElement addChild(String parentId, AqElement child)
+      - Set&lt;String&gt; collectAllIds()
+      - String? get binding => null  (дефолт)
+      - UiActionConfig? get action => null  (дефолт)
+    </base_class_has>
+
+    <base_class_does_not_have>
+      - Widget toWidget() — ЗАПРЕЩЕНО
+      - Любые Flutter-типы
+    </base_class_does_not_have>
+  </aq_element_structure>
+
+  <!-- ============================================ -->
+  <!-- МИКСИНЫ -->
+  <!-- ============================================ -->
+
+  <mixins>
+    <rule>Миксины не импортируют Flutter</rule>
+    <rule>Миксины не содержат методов возвращающих Widget</rule>
+
+    <what_goes_in_mixin>Свойства встречающиеся в нескольких несвязанных классах</what_goes_in_mixin>
+    <examples>
+      <mixin name="AqBorderMixin">borderRadius, borderWidth, borderColor</mixin>
+      <mixin name="AqBackgroundMixin">backgroundColor</mixin>
+      <mixin name="AqBindableMixin">только схема для PropertiesPanel, само поле binding — в конкретном классе</mixin>
+    </examples>
+
+    <what_goes_in_class>Свойства специфичные только для одного класса</what_goes_in_class>
+  </mixins>
+
+  <!-- ============================================ -->
+  <!-- РЕЕСТР -->
+  <!-- ============================================ -->
+
+  <registry>
+    <two_files>
+      <file name="aq_element_registry.dart">Класс AqElementRegistry — только механика (register, createElement)</file>
+      <file name="aq_element_registry_init.dart">Функция initializeAqElementRegistry() — только регистрация типов</file>
+    </two_files>
+    <rule>AqElementRegistry НЕ дублируется в aq_element.dart</rule>
+    <initialization><![CDATA[
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  initializeAqElementRegistry();   // сначала модели
+  registerAllComponentBuilders();  // потом билдеры
+  runApp(...);
+}
+    ]]></initialization>
+  </registry>
+
+  <!-- ============================================ -->
+  <!-- ИМЕНОВАНИЕ -->
+  <!-- ============================================ -->
+
+  <naming>
+    <rule what="Файлы">snake_case → column_element.dart</rule>
+    <rule what="Классы">PascalCase → ColumnElement</rule>
+    <rule what="Поля">camelCase → mainAxisAlign</rule>
+    <rule what="Enum значения">camelCase → AqMainAxisAlign.spaceBetween</rule>
+    <rule what="JSON ключи в props">camelCase → "mainAxisAlign", "borderRadius"</rule>
+    <rule what="Тип в JSON и реестре">PascalCase → "Column", "TextInput"</rule>
+    <rule what="Ключи AqPropertyDef">совпадают с полем класса → поле borderRadius → ключ 'borderRadius'</rule>
+  </naming>
+
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ ДЛЯ AI -->
+  <!-- ============================================ -->
+
+  <ai_checklist>
+
+    <before_writing_model_code>
+      <checks>
+        ☐ Файл в lib/core/ui/model/ — нет import 'package:flutter/'?
+        ☐ Нет метода toWidget()?
+        ☐ Все цвета — строки-токены, не Color/hex?
+        ☐ Все alignment/size/overflow — строки, не Flutter enums?
+        ☐ Все поля final?
+        ☐ copyWith для nullable использует сентинель _absent?
+        ☐ copyWithProperty реализован?
+        ☐ toJson() пишет 'props', не 'properties'?
+        ☐ fromJson() читает через _readProps()?
+        ☐ Тип в реестре PascalCase?
+      </checks>
+    </before_writing_model_code>
+
+    <when_adding_color_field>
+      <action>Использовать String? с токеном, не Color</action>
+      <action>Преобразование в Color — только в UiTokens.resolveColor()</action>
+    </when_adding_color_field>
+
+    <when_adding_alignment_field>
+      <action>Использовать String с допустимыми значениями, не Flutter enum</action>
+    </when_adding_alignment_field>
+
+  </ai_checklist>
+
+</flutter_ui_model_rules>

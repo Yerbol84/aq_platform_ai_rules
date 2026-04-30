@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<aq_schema_architecture_rules version="1.0">
+
+  <!--
+    Правила архитектуры AQ платформы.
+    Источник: aq_schema/doc/PACKAGE_ARCHITECTURE.md v2.0
+
+    Суть:
+      aq_schema — конституция платформы. Общий язык, контракты, интерфейсы.
+      Пакеты реализуют контракты. Приложения собирают реализации.
+      Потребители работают только через IInterface.instance.
+  -->
+
+  <!-- ============================================ -->
+  <!-- aq_schema — ЕДИНСТВЕННЫЙ ИСТОЧНИК ИСТИНЫ -->
+  <!-- ============================================ -->
+
+  <core_principle id="aq_schema_is_truth">
+    <title>aq_schema — единственный источник истины</title>
+    <rule>
+      Всё что нужно двум и более пакетам — живёт в aq_schema.
+      Всё что нужно только одному пакету — остаётся в нём.
+    </rule>
+
+    <what_lives_in_aq_schema>
+      - Доменные модели (WorkflowGraph, InstructionGraph, AqStudioProject)
+      - Интерфейсы сервисов (IAQAuthService, IAQVaultClient)
+      - Клиентские интерфейсы (IAQGraphEngineClient, IAQAuthUserClient)
+      - Storable контракты (DirectStorable, VersionedStorable, LoggedStorable)
+      - Sandbox политики и интерфейсы
+      - Контракты безопасности (AQTokenClaims, AQRole, AQPolicy)
+      - API Contract интерфейсы (IAqApiContract)
+      - Переиспользуемые утилиты (ConditionEvaluator)
+    </what_lives_in_aq_schema>
+
+    <what_does_not_live_in_aq_schema>
+      - HTTP-клиенты, Drift-таблицы, конкретные реализации
+      - Бизнес-логика пакетов
+      - UI-компоненты
+      - LLM SDK, MCP транспорт
+      - Реальное создание процессов
+    </what_does_not_live_in_aq_schema>
+
+    <check>
+      Перед созданием класса: "Нужен ли он двум пакетам?"
+      Если да → в aq_schema. Если нет → в пакете.
+    </check>
+  </core_principle>
+
+  <!-- ============================================ -->
+  <!-- ТЕМАТИЧЕСКИЕ BARREL-ФАЙЛЫ -->
+  <!-- ============================================ -->
+
+  <barrel_files_structure>
+    <title>Тематические наборы экспорта aq_schema</title>
+    <rule>
+      aq_schema экспортирует тематические наборы, не отдельные файлы.
+      Потребитель импортирует ровно тот набор, который ему нужен.
+    </rule>
+
+    <barrels>
+      <barrel file="aq_schema.dart">Полный набор — только для тестов и schema-aware пакетов</barrel>
+      <barrel file="graph.dart">Графовый домен: WorkflowGraph, InstructionGraph, узлы, runner</barrel>
+      <barrel file="security.dart">Безопасность: auth, roles, claims, policies</barrel>
+      <barrel file="data.dart">Слой данных: vault, storable, query models</barrel>
+      <barrel file="tools.dart">Инструменты: AQToolService, LLM/Vault interfaces</barrel>
+      <barrel file="sandbox.dart">Песочница: ISandbox, SandboxPolicy, events</barrel>
+      <barrel file="worker.dart">Воркеры: WorkerJob, JobStatus, queue contracts</barrel>
+      <barrel file="clients.dart">Клиентские интерфейсы всех сервисов + .instance</barrel>
+    </barrels>
+
+    <import_rules>
+      <rule>Импортировать минимально необходимый barrel, не aq_schema.dart</rule>
+      <correct>import 'package:aq_schema/data.dart';</correct>
+      <correct>import 'package:aq_schema/security.dart';</correct>
+      <incorrect>import 'package:aq_schema/aq_schema.dart'; // только если реально нужно всё</incorrect>
+    </import_rules>
+
+    <import_map>
+      <package name="aq_graph_engine">graph.dart, security.dart (claims), data.dart (repos), tools.dart, sandbox.dart</package>
+      <package name="aq_auth">security.dart, data.dart (storable)</package>
+      <package name="dart_vault">security.dart (access), data.dart</package>
+      <package name="aq_tool_service">security.dart (claims), data.dart (vault), tools.dart</package>
+      <package name="aq_sandbox">security.dart (policy), sandbox.dart</package>
+      <package name="server_app">graph.dart, security.dart, data.dart, tools.dart, sandbox.dart, clients.dart</package>
+      <package name="flutter_app">graph.dart, security.dart, data.dart, clients.dart</package>
+    </import_map>
+  </barrel_files_structure>
+
+  <!-- ============================================ -->
+  <!-- AQPlatform.init — ТОЧКА СБОРКИ -->
+  <!-- ============================================ -->
+
+  <assembly_point>
+    <title>AQPlatform.init — единственная точка сборки</title>
+    <rule>
+      Только приложение (main.dart) знает о конкретных реализациях.
+      Только приложение вызывает AQPlatform.init().
+      Пакеты используют IInterface.instance — никогда не создают реализации сами.
+    </rule>
+
+    <initialization_order>
+      <step number="1">Auth — первым, остальные могут требовать токен</step>
+      <step number="2">Vault — после auth (нужен токен)</step>
+      <step number="3">Tools — может зависеть от vault</step>
+      <step number="4">Engine — после tools и vault</step>
+      <step number="5">AQPlatform.init(auth, vault, tools, engine, sandbox)</step>
+    </initialization_order>
+
+    <example>
+      <code><![CDATA[
+// main.dart — точка сборки
+final auth = RemoteAuthClient(serverUrl: authUrl);
+await auth.loginWithApiKey(apiKey);
+
+final vault = RemoteVaultClient(endpoint: vaultUrl, auth: auth);
+
+final tools = AQToolServiceBuilder()
+  .withLlm(AnthropicService(apiKey: llmKey))
+  .withVault(VaultToolAdapter(vault))
+  .build();
+
+final engine = GraphEngineService.local(tools: tools, vault: vault, auth: auth);
+
+// Регистрация — после этого IInterface.instance работает везде
+AQPlatform.init(auth: auth, vault: vault, tools: tools, engine: engine);
+      ]]></code>
+    </example>
+
+    <forbidden>
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО — пакет создаёт реализацию сам
+class MyService {
+  final _vault = RemoteVaultClient('http://localhost:8765'); // ❌
+}
+
+// ✅ ПРАВИЛЬНО — через интерфейс
+class MyService {
+  void doWork() {
+    final vault = IAQVaultClient.instance; // ✅
+  }
+}
+      ]]></code>
+    </forbidden>
+  </assembly_point>
+
+  <!-- ============================================ -->
+  <!-- ТИПИЗИРОВАННЫЕ КЛИЕНТЫ -->
+  <!-- ============================================ -->
+
+  <typed_clients>
+    <title>Принцип наименьших привилегий через типизированных клиентов</title>
+    <rule>
+      Каждый сервис предоставляет разных клиентов для разных потребителей.
+      Воркер не получает AdminClient. Узел не получает Registry.
+    </rule>
+
+    <service name="aq_auth">
+      <client interface="IAQAuthUserClient">UI приложения: login, logout, currentToken, refreshToken</client>
+      <client interface="IAQAuthResourceClient">Воркеры/серверы: loginWithApiKey, validateToken</client>
+      <client interface="IAQAuthAdminClient">Администраторы: управление ролями, выдача ключей</client>
+      <client interface="IAQAuthEngineClient">Движок: offline validateToken, extractClaims без HTTP</client>
+    </service>
+
+    <service name="dart_vault">
+      <client interface="IAQVaultUserClient">UI: CRUD своих объектов в рамках projectId</client>
+      <client interface="IAQVaultEngineClient">Движок: read-only загрузка графов, запись run-state</client>
+      <client interface="IAQVaultWorkerClient">Воркер: = EngineClient через RemoteVaultStorage</client>
+      <client interface="IAQVaultAdminClient">Администратор: cross-tenant query, миграции</client>
+    </service>
+
+    <service name="aq_sandbox">
+      <client interface="ISandboxContext">Узел (ISandboxCapable): read/write в своём namespace</client>
+      <client interface="ISandboxRegistry">Движок: создать/уничтожить sandbox для run</client>
+      <client interface="IAQSandboxAdminClient">Администратор: квоты, активные sandbox</client>
+    </service>
+  </typed_clients>
+
+  <!-- ============================================ -->
+  <!-- СТРУКТУРА ПАКЕТА -->
+  <!-- ============================================ -->
+
+  <package_structure>
+    <title>Единая структура для всех пакетов AQ</title>
+    <layout><![CDATA[
+my_package/
+├── lib/
+│   ├── my_package.dart    # ТОЛЬКО клиентский экспорт
+│   ├── client/            # Тонкий клиент (HTTP/gRPC)
+│   ├── server/            # Вся бизнес-логика
+│   │   └── storage/       # Storage ТОЛЬКО здесь
+│   └── server.dart        # Серверный экспорт
+├── test/
+│   ├── integration/       # Клиент + сервер вместе
+│   └── unit/
+└── pubspec.yaml           # Зависит только от aq_schema + внешние libs
+    ]]></layout>
+
+    <rules>
+      <rule>lib/my_package.dart экспортирует ТОЛЬКО client/</rule>
+      <rule>lib/server.dart экспортирует server/ (и может включать client/)</rule>
+      <rule>Storage реализации живут ТОЛЬКО в server/storage/</rule>
+      <rule>pubspec.yaml содержит только aq_schema + внешние библиотеки</rule>
+      <rule>НЕТ зависимостей на другие aq_* пакеты</rule>
+    </rules>
+  </package_structure>
+
+  <!-- ============================================ -->
+  <!-- РЕГИСТРАЦИЯ ДОМЕНОВ -->
+  <!-- ============================================ -->
+
+  <domain_registration>
+    <title>Домены регистрируются строго из aq_schema</title>
+    <rule>
+      Все модели в DomainRegistration берутся из aq_schema.
+      Никаких локальных моделей в registry.
+    </rule>
+
+    <correct><![CDATA[
+// ✅ ПРАВИЛЬНО — модели из aq_schema
+registry
+  ..register(DomainRegistration(
+    collection: WorkflowGraph.kCollection,   // из aq_schema
+    mode: StorageMode.versioned,
+    fromMap: WorkflowGraph.fromMap,          // из aq_schema
+  ))
+  ..register(DomainRegistration(
+    collection: AqStudioProject.kCollection, // из aq_schema
+    mode: StorageMode.direct,
+    fromMap: AqStudioProject.fromMap,        // из aq_schema
+  ));
+    ]]></correct>
+
+    <incorrect><![CDATA[
+// ❌ ЗАПРЕЩЕНО — локальная модель
+registry.register(DomainRegistration(
+  collection: 'my_local_model',
+  fromMap: MyLocalModel.fromMap, // ❌ не из aq_schema
+));
+    ]]></incorrect>
+  </domain_registration>
+
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ ДЛЯ AI -->
+  <!-- ============================================ -->
+
+  <ai_checklist>
+
+    <before_creating_model>
+      <question>Нужна ли эта модель двум и более пакетам?</question>
+      <if_yes>Создать в aq_schema в соответствующей директории, экспортировать из barrel</if_yes>
+      <if_no>Создать внутри пакета</if_no>
+    </before_creating_model>
+
+    <before_adding_import>
+      <question>Импортирую aq_schema.dart?</question>
+      <if_yes>Заменить на минимально необходимый barrel (data.dart, security.dart, etc.)</if_yes>
+    </before_adding_import>
+
+    <before_creating_client>
+      <question>Для кого этот клиент? (User/Resource/Admin/Engine)</question>
+      <action>Создать типизированный интерфейс в aq_schema/clients.dart</action>
+    </before_creating_client>
+
+    <before_writing_main>
+      <checklist>
+        ☐ Auth инициализируется первым
+        ☐ Vault после auth
+        ☐ Tools после vault
+        ☐ Engine после tools
+        ☐ AQPlatform.init() вызывается один раз
+        ☐ Нигде в пакетах нет прямого создания реализаций
+      </checklist>
+    </before_writing_main>
+
+    <new_package_checklist>
+      ☐ Модели и интерфейсы определены в aq_schema
+      ☐ kCollection константа добавлена в модель
+      ☐ fromMap/toMap через Model.keys (не хардкод)
+      ☐ Структура lib/client/ + lib/server/ + lib/server.dart
+      ☐ pubspec.yaml: только aq_schema + внешние libs
+      ☐ Интеграционные тесты (клиент + сервер)
+    </new_package_checklist>
+
+  </ai_checklist>
+
+</aq_schema_architecture_rules>

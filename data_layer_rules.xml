@@ -1,0 +1,388 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<data_layer_rules version="1.0">
+
+  <!--
+    Правила работы с data layer (dart_vault / aq_data_layer).
+    Источники:
+      - aq_schema/doc/PACKAGE_ARCHITECTURE.md
+      - aq_schema/doc/SECURITY_PROTOCOL_IMPLEMENTATION_GUIDE.md
+      - aq_schema/doc/INFRASTRUCTURE_INTERFACES.md
+      - aq_data_layer/doc/architecture/ARCHITECTURE.md
+
+    Суть:
+      dart_vault — реализация data layer.
+      Все модели — из aq_schema.
+      Все домены регистрируются через VaultRegistry.
+      Безопасность — через IVaultSecurityProtocol (не внутри vault).
+  -->
+
+  <!-- ============================================ -->
+  <!-- STORABLE ИНТЕРФЕЙСЫ -->
+  <!-- ============================================ -->
+
+  <storable_interfaces>
+    <title>Три режима хранения — выбирается при регистрации домена</title>
+
+    <mode name="DirectStorable">
+      <description>Простое CRUD хранение без истории</description>
+      <delete_behavior>Hard delete — запись удаляется физически</delete_behavior>
+      <use_when>Конфигурации, справочники, объекты без истории изменений</use_when>
+      <example>AqStudioProject, TestDocumentV1</example>
+    </mode>
+
+    <mode name="VersionedStorable">
+      <description>Хранение с версионированием (draft → published → archived)</description>
+      <delete_behavior>Soft delete — меняется state флаг, запись остаётся</delete_behavior>
+      <use_when>Графы, документы, всё что имеет жизненный цикл версий</use_when>
+      <example>WorkflowGraph, InstructionGraph, PromptGraph</example>
+    </mode>
+
+    <mode name="LoggedStorable">
+      <description>Хранение с полным аудит-логом каждой операции</description>
+      <delete_behavior>Hard delete + запись в audit log</delete_behavior>
+      <use_when>Критичные данные требующие compliance, run-записи, security события</use_when>
+      <example>WorkflowRun, AqAccessLog, AqAuditTrail</example>
+    </mode>
+
+    <rule>
+      Выбор режима определяется при регистрации домена в VaultRegistry.
+      Нельзя менять режим после деплоя без миграции.
+    </rule>
+
+    <storable_contract>
+      <code><![CDATA[
+// Модель ОБЯЗАНА реализовывать соответствующий интерфейс
+class WorkflowGraph implements VersionedStorable {
+  static const String kCollection = 'workflow_graphs';
+  static final _WorkflowGraphKeys _keys = _WorkflowGraphKeys._();
+  static _WorkflowGraphKeys get keys => _keys;
+
+  @override
+  String get id => _id;
+
+  @override
+  String get tenantId => _tenantId;
+
+  @override
+  bool get softDelete => false; // VersionedStorable требует это поле
+
+  @override
+  Map<String, dynamic> toMap() => {
+    WorkflowGraph.keys.id: _id,
+    WorkflowGraph.keys.tenantId: _tenantId,
+    // ... остальные поля через keys
+  };
+
+  static WorkflowGraph fromMap(Map<String, dynamic> map) => WorkflowGraph(
+    id: map[WorkflowGraph.keys.id] as String,
+    // ...
+  );
+}
+      ]]></code>
+    </storable_contract>
+  </storable_interfaces>
+
+  <!-- ============================================ -->
+  <!-- VAULT REGISTRY -->
+  <!-- ============================================ -->
+
+  <vault_registry>
+    <title>VaultRegistry — центр регистрации доменов на сервере</title>
+    <rule>Все домены регистрируются до вызова registry.deploy()</rule>
+    <rule>Модели берутся ТОЛЬКО из aq_schema</rule>
+    <rule>После deploy() схема БД создана/обновлена</rule>
+
+    <registration_pattern>
+      <code><![CDATA[
+// ✅ ПРАВИЛЬНО — серверная инициализация
+final registry = VaultRegistry(
+  storageFactory: (tenantId) => PostgresVaultStorage(
+    pool: pool,
+    tenantId: tenantId,
+  ),
+  deployer: PostgresSchemaDeployer(pool: pool),
+);
+
+// Регистрация доменов из aq_schema
+registry
+  ..register(DomainRegistration(
+    collection: WorkflowGraph.kCollection,
+    mode: StorageMode.versioned,
+    fromMap: WorkflowGraph.fromMap,
+    jsonSchema: WorkflowGraph.kJsonSchema,
+    schemaVersion: WorkflowGraph.kSchemaVersion,
+  ))
+  ..register(DomainRegistration(
+    collection: AqStudioProject.kCollection,
+    mode: StorageMode.direct,
+    fromMap: AqStudioProject.fromMap,
+    jsonSchema: AqStudioProject.kJsonSchema,
+  ))
+  ..register(DomainRegistration(
+    collection: WorkflowRun.kCollection,
+    mode: StorageMode.logged,
+    fromMap: WorkflowRun.fromMap,
+  ));
+
+await registry.deploy(); // Создаёт таблицы
+      ]]></code>
+    </registration_pattern>
+
+    <storage_modes_mapping>
+      <mapping mode="StorageMode.direct">DirectStorable → прямые CRUD операции</mapping>
+      <mapping mode="StorageMode.versioned">VersionedStorable → версионирование + soft delete</mapping>
+      <mapping mode="StorageMode.logged">LoggedStorable → CRUD + audit log каждой операции</mapping>
+    </storage_modes_mapping>
+  </vault_registry>
+
+  <!-- ============================================ -->
+  <!-- HANDSHAKE ПРОТОКОЛ -->
+  <!-- ============================================ -->
+
+  <handshake_protocol>
+    <title>Handshake — обязательный первый шаг клиента</title>
+    <rule>Клиент ВСЕГДА делает handshake перед любыми операциями</rule>
+    <rule>Handshake возвращает список доступных коллекций и capabilities</rule>
+
+    <flow>
+      <step number="1">Клиент: POST /v1/vault/handshake с tenantId</step>
+      <step number="2">Сервер: возвращает serverVersion, collections, capabilities, compatible</step>
+      <step number="3">Клиент: проверяет compatible == true</step>
+      <step number="4">Клиент: готов к работе с репозиториями</step>
+    </flow>
+
+    <response_example><![CDATA[
+{
+  "serverVersion": "0.4.0",
+  "tenantId": "user-123",
+  "collections": [
+    {"name": "workflow_graphs", "mode": "versioned", "schemaVersion": "1.0.0"},
+    {"name": "projects", "mode": "direct", "schemaVersion": "1.0.0"}
+  ],
+  "capabilities": ["direct", "versioned", "logged", "artifact", "vector"],
+  "compatible": true
+}
+    ]]></response_example>
+  </handshake_protocol>
+
+  <!-- ============================================ -->
+  <!-- SECURITY PROTOCOL -->
+  <!-- ============================================ -->
+
+  <security_protocol>
+    <title>IVaultSecurityProtocol — безопасность через DIP</title>
+    <rule>
+      dart_vault НЕ знает о JWT, ролях, политиках.
+      Безопасность делегируется через IVaultSecurityProtocol.
+      Если protocol не инициализирован — всё разрешено (dev режим).
+    </rule>
+
+    <architecture><![CDATA[
+dart_vault (Data Layer)
+  → зависит от IVaultSecurityProtocol (aq_schema)
+    → реализуется AqVaultSecurityProtocol (aq_security)
+    ]]></architecture>
+
+    <protocol_methods>
+      <method name="extractClaims(headers)">Извлечь AqTokenClaims из HTTP headers</method>
+      <method name="canRead(claims, collection, entityId?)">AccessAllowed | AccessDenied | AccessRestricted</method>
+      <method name="canWrite(claims, collection, entityId?, data)">AccessAllowed | AccessDenied</method>
+      <method name="canDelete(claims, collection, entityId)">AccessAllowed | AccessDenied</method>
+      <method name="checkRateLimit(claims, operation, ip?)">RateLimitOk | RateLimitExceeded</method>
+      <method name="validateData(collection, data)">ValidationOk | ValidationFailed</method>
+      <method name="encryptSensitiveFields(claims, collection, data)">Map с зашифрованными полями</method>
+      <method name="logOperation(claims, operation, collection, entityId?, success, error?)">void</method>
+    </protocol_methods>
+
+    <access_decisions>
+      <decision name="AccessAllowed">Полный доступ</decision>
+      <decision name="AccessDenied">Доступ запрещён (с причиной)</decision>
+      <decision name="AccessRestricted">Доступ только к allowedIds (RLS)</decision>
+    </access_decisions>
+
+    <initialization><![CDATA[
+// В точке сборки (main.dart)
+IVaultSecurityProtocol.initialize(
+  AqVaultSecurityProtocol(securityService: ISecurityService.instance)
+);
+    ]]></initialization>
+
+    <caching_rules>
+      <rule>JWT validation кешировать (TTL = token expiration)</rule>
+      <rule>RLS решения кешировать (TTL = 5 минут, инвалидировать при изменении прав)</rule>
+      <rule>Схемы коллекций кешировать (TTL = 1 час)</rule>
+      <rule>Encryption keys кешировать (TTL = 24 часа)</rule>
+    </caching_rules>
+  </security_protocol>
+
+  <!-- ============================================ -->
+  <!-- INFRASTRUCTURE INTERFACES -->
+  <!-- ============================================ -->
+
+  <infrastructure_interfaces>
+    <title>Инфраструктурные интерфейсы из aq_schema</title>
+    <rule>dart_vault реализует эти интерфейсы и регистрирует синглтоны при старте</rule>
+
+    <interface name="ISecretsManager">
+      <file>aq_schema/lib/data_layer/infrastructure/secrets_manager.dart</file>
+      <purpose>Управление секретами (JWT secrets, DB credentials, API keys)</purpose>
+      <usage>ISecretsManager.instance.getSecret('JWT_SECRET')</usage>
+    </interface>
+
+    <interface name="IBackupService">
+      <file>aq_schema/lib/data_layer/infrastructure/backup_service.dart</file>
+      <purpose>Backup и восстановление данных</purpose>
+      <usage>IBackupService.instance.createBackup(collections: [...])</usage>
+    </interface>
+
+    <interface name="IDatabaseHardening">
+      <file>aq_schema/lib/data_layer/infrastructure/database_hardening.dart</file>
+      <purpose>Database optimization, connection pool, индексы</purpose>
+      <usage>IDatabaseHardening.instance.healthCheck()</usage>
+    </interface>
+
+    <initialization><![CDATA[
+// dart_vault при старте регистрирует все три
+void initializeInfrastructure() {
+  ISecretsManager.initialize(VaultSecretsManager());
+  IBackupService.initialize(VaultBackupService());
+  IDatabaseHardening.initialize(PostgresHardening());
+}
+    ]]></initialization>
+  </infrastructure_interfaces>
+
+  <!-- ============================================ -->
+  <!-- КЛИЕНТСКОЕ ИСПОЛЬЗОВАНИЕ -->
+  <!-- ============================================ -->
+
+  <client_usage>
+    <title>Клиент работает через репозитории — не знает о хранилище</title>
+
+    <pattern><![CDATA[
+// ✅ Клиент подключается и получает репозиторий
+await Vault.connect('http://localhost:8765');
+
+final workflows = Vault.instance.versioned<WorkflowGraph>(
+  collection: WorkflowGraph.kCollection,
+  fromMap: WorkflowGraph.fromMap,
+);
+
+// Работа с репозиторием
+final node = await workflows.createEntity(myWorkflow);
+final list = await workflows.listEntities(tenantId: 'user-123');
+await workflows.publishEntity(entityId: node.entityId);
+    ]]></pattern>
+
+    <rule>Клиент НЕ знает о PostgreSQL, Supabase, in-memory</rule>
+    <rule>Клиент НЕ пишет SQL</rule>
+    <rule>Клиент НЕ управляет транзакциями напрямую</rule>
+  </client_usage>
+
+  <!-- ============================================ -->
+  <!-- ЗАПРЕЩЁННЫЕ ПАТТЕРНЫ -->
+  <!-- ============================================ -->
+
+  <forbidden_patterns>
+
+    <pattern id="local_model_in_registry">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО — локальная модель в registry
+registry.register(DomainRegistration(
+  collection: 'my_local_collection',
+  fromMap: MyLocalModel.fromMap, // ❌ не из aq_schema
+));
+      ]]></code>
+    </pattern>
+
+    <pattern id="hardcoded_collection_name">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО — хардкод имени коллекции
+final repo = vault.versioned(collection: 'workflow_graphs', ...); // ❌
+
+// ✅ ПРАВИЛЬНО
+final repo = vault.versioned(collection: WorkflowGraph.kCollection, ...); // ✅
+      ]]></code>
+    </pattern>
+
+    <pattern id="security_logic_in_vault">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО — логика безопасности внутри vault
+class PostgresVaultStorage {
+  Future<void> write(String key, value) async {
+    if (user.role == 'admin') { ... } // ❌ Роли — не компетенция vault
+  }
+}
+
+// ✅ ПРАВИЛЬНО — делегировать через protocol
+class PostgresVaultStorage {
+  Future<void> write(String key, value, Map<String, String> headers) async {
+    final claims = await IVaultSecurityProtocol.instance.extractClaims(headers);
+    final decision = await IVaultSecurityProtocol.instance.canWrite(
+      claims: claims, collection: key, data: value,
+    );
+    if (decision is AccessDenied) throw SecurityException(decision.reason);
+    // ... сохранить
+  }
+}
+      ]]></code>
+    </pattern>
+
+    <pattern id="storage_in_client_export">
+      <code><![CDATA[
+// ❌ ЗАПРЕЩЕНО — storage в клиентском экспорте
+// lib/dart_vault.dart
+export 'storage/postgres_vault_storage.dart'; // ❌ Storage только на сервере!
+
+// ✅ ПРАВИЛЬНО
+// lib/dart_vault.dart — только клиент
+export 'client/vault.dart';
+// lib/server.dart — сервер
+export 'storage/postgres_vault_storage.dart';
+      ]]></code>
+    </pattern>
+
+  </forbidden_patterns>
+
+  <!-- ============================================ -->
+  <!-- ЧЕКЛИСТ ДЛЯ AI -->
+  <!-- ============================================ -->
+
+  <ai_checklist>
+
+    <before_creating_storable_model>
+      <checklist>
+        ☐ Выбрать режим: Direct / Versioned / Logged
+        ☐ Реализовать соответствующий интерфейс из aq_schema
+        ☐ Добавить static const kCollection
+        ☐ Добавить static get keys (Model.keys паттерн)
+        ☐ toMap() и fromMap() через keys (не хардкод)
+        ☐ Добавить bool get softDelete (для VersionedStorable)
+      </checklist>
+    </before_creating_storable_model>
+
+    <before_registering_domain>
+      <checklist>
+        ☐ Модель из aq_schema (не локальная)
+        ☐ StorageMode соответствует интерфейсу модели
+        ☐ fromMap из модели (не лямбда с хардкодом)
+        ☐ registry.deploy() вызывается после всех register()
+      </checklist>
+    </before_registering_domain>
+
+    <before_adding_security>
+      <checklist>
+        ☐ Логика безопасности НЕ внутри vault методов
+        ☐ Используется IVaultSecurityProtocol.instance
+        ☐ Инициализация protocol в точке сборки
+        ☐ Кеширование JWT validation
+      </checklist>
+    </before_adding_security>
+
+    <when_softdelete_error>
+      <description>Ошибка "Missing concrete implementation of getter Storable.softDelete"</description>
+      <fix>Добавить в класс: @override bool get softDelete => false;</fix>
+    </when_softdelete_error>
+
+  </ai_checklist>
+
+</data_layer_rules>
