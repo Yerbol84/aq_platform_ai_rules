@@ -231,6 +231,25 @@
         </not_allowed>
       </rule>
 
+      <rule id="run_state_contracts">
+        <description>IRunRepository и IRunStateManager — разные ответственности, не путать</description>
+        <IRunRepository>
+          Персистентность lifecycle run: статус, логи, contextJson, suspendedNodeId.
+          Используй для: createRun, updateRunLog, suspendRun, getRun, resume, complete.
+          Аналогия: журнал событий — каждая запись факт о run.
+        </IRunRepository>
+        <IRunStateManager>
+          Стратегия кэширования RunContext между узлами: когда и как сохранять.
+          Используй для: checkpointForNode (после IStatefulNode узла), restore, evict.
+          Аналогия: буфер записи — решает когда сбрасывать, не знает о lifecycle.
+        </IRunStateManager>
+        <forbidden>
+          - stateManager.suspend() / stateManager.resume() — используй repo.suspendRun() / repo.resume()
+          - repo.checkpoint() — такого метода нет, используй stateManager.checkpointForNode()
+          - Вызывать оба при suspend — только repo.suspendRun() + repo.updateRunLog()
+        </forbidden>
+      </rule>
+
       <rule id="atomic_mechanism_change">
         <description>При замене механизма — атомарно удалять старый</description>
         <principle>
