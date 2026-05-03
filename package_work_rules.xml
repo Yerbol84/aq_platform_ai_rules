@@ -2,8 +2,35 @@
 <package_work_rules version="1.0">
   
   <!-- ============================================ -->
-  <!-- КРИТИЧЕСКИЕ ПРАВИЛА РАБОТЫ С ПАКЕТАМИ -->
+  <!-- ПРАВИЛО: УТОЧНЕНИЕ ПЕРЕД ДЕЙСТВИЕМ -->
   <!-- ============================================ -->
+
+  <rule id="clarify_before_act" priority="CRITICAL">
+    <title>Размытая задача → сначала уточни</title>
+    <description>
+      Если задача допускает несколько интерпретаций —
+      ОСТАНОВИСЬ и задай уточняющий вопрос.
+      НЕ додумывай самостоятельно что именно нужно сделать.
+      НЕ читай файлы "на всякий случай" или "чтобы подготовиться".
+    </description>
+    <trigger>
+      Любая задача где непонятно:
+      - какие именно файлы трогать
+      - в каком объёме делать изменения
+      - нужно ли читать чужие пакеты для выполнения
+    </trigger>
+    <correct>
+      Пользователь: "расширь план конкретными файлами"
+      AI: "Уточни — файлы внутри наших пакетов (что менять),
+           или нужно изучить чужие слои (vault, security)?"
+    </correct>
+    <incorrect>
+      Пользователь: "расширь план конкретными файлами"
+      AI: [лезет в dart_vault чтобы "подготовиться"]
+    </incorrect>
+  </rule>
+
+
   
   <critical_rules>
     
@@ -274,6 +301,35 @@
   <!-- ============================================ -->
   
   <patterns>
+    
+    <pattern name="declarative_naming">
+      <when>Создание любого интерфейса, класса, файла</when>
+      <rule>
+        Имя должно однозначно отвечать на вопрос:
+        "Что это? Для какого домена? Что делает?"
+        Без контекста — имя должно быть понятно само по себе.
+      </rule>
+      <naming_checklist>
+        ☐ Интерфейс репозитория → I{Domain}Repository
+            Плохо:  ISessionRepository   (какая сессия? auth? subject?)
+            Хорошо: ISubjectSessionRepository
+            Хорошо: IAuthSessionRepository
+        ☐ Модель записи → {Domain}Entry / {Domain}Record
+            Плохо:  SessionEntry
+            Хорошо: SubjectSessionEntry
+        ☐ In-memory реализация → InMemory{Domain}{Type}
+            Плохо:  InMemoryRepository
+            Хорошо: InMemorySubjectSessionRepository
+        ☐ Файл → snake_case отражает имя класса
+            Плохо:  i_session_repository.dart
+            Хорошо: i_subject_session_repository.dart
+      </naming_checklist>
+      <conflict_check>
+        Перед созданием нового типа — проверить:
+        нет ли уже типа с похожим именем в aq_schema или других пакетах.
+        Особенно в security/, auth/, data_layer/.
+      </conflict_check>
+    </pattern>
     
     <pattern name="reading_aq_schema">
       <when>Нужно понять интерфейс из aq_schema</when>

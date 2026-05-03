@@ -190,7 +190,51 @@
       
     </rule_category>
     
-    <rule_category name="code_quality" priority="high">
+    <rule_category name="data_storage" priority="critical">
+
+      <rule id="data_layer_only">
+        <description>Данные с жизненным циклом — только через IDataLayer порт</description>
+        <principle>
+          Любые данные имеющие жизненный цикл (регистрации, записи, состояния, история)
+          хранятся ТОЛЬКО через IDataLayer или соответствующий порт data layer из aq_schema.
+          Пакет не решает где хранить — это прерогатива data layer.
+        </principle>
+        <forbidden><![CDATA[
+// ❌ ЗАПРЕЩЕНО — пакет сам решает где хранить
+final Map<String, List<ToolRecord>> _records = {};
+final List<SubjectRecord> _subjects = [];
+        ]]></forbidden>
+        <correct><![CDATA[
+// ✅ ПРАВИЛЬНО — делегируем data layer
+final _repo = IDataLayer.instance.direct<ToolRecord>(ToolRecord.kCollection);
+await _repo.save(record);
+final records = await _repo.findAll();
+        ]]></correct>
+        <exception>
+          In-memory допустимо ТОЛЬКО как кеш поверх data layer
+          с явным комментарием: // cache
+        </exception>
+        <when_data_layer_insufficient>
+          Если IDataLayer не предоставляет нужный интерфейс —
+          это задача для data layer (aq_schema + реализация).
+          Не создавать Map как обходное решение.
+          Зафиксировать как задачу: "IDataLayer не поддерживает X".
+        </when_data_layer_insufficient>
+      </rule>
+
+      <rule id="no_invented_interfaces">
+        <description>Не выдумывать интерфейсы — использовать только существующие в aq_schema</description>
+        <principle>
+          Перед использованием любого интерфейса — проверить что он реально существует в aq_schema.
+          Не фантазировать названия (IAQVaultClient, IStorageService и т.д.).
+        </principle>
+        <how_to_check>
+          grep -rn "abstract interface class" aq_schema/lib/
+        </how_to_check>
+        <real_data_layer_interface>IDataLayer в aq_schema/lib/data_layer/i_data_layer.dart</real_data_layer_interface>
+      </rule>
+
+    </rule_category>
       
       <rule id="minimal_code">
         <description>Писать минимально необходимый код</description>
