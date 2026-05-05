@@ -1,0 +1,373 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inter_layer_communication_rules version="1.0">
+
+  <!--
+    Правила взаимодействия между слоями AQ Platform.
+
+    Суть:
+      Пакеты не знают друг о друге.
+      Всё взаимодействие — через aq_schema (порты + моки + tech_debt).
+      Тесты работают без реальных реализаций — только aq_schema.
+      Запросы между командами — через папку tech_debt в aq_schema.
+  -->
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 1: ИЗОЛЯЦИЯ СЛОЁВ -->
+  <!-- ============================================ -->
+
+  <layer_isolation>
+    <title>Каждый пакет тестируется только через aq_schema</title>
+
+    <principle>
+      В тестах и отладке — никаких зависимостей от других пакетов-реализаций.
+      Только aq_schema: порты + моки + заглушки.
+      В production — приложение (точка сборки) подключает реальные реализации.
+    </principle>
+
+    <mock_location>
+      <rule>
+        Моки и заглушки живут в aq_schema — рядом с портом который они реализуют.
+        Команда объявляющая порт обязана поставить мок. Мок — часть контракта.
+      </rule>
+
+      <structure><![CDATA[
+aq_schema/lib/security/
+├── interfaces/
+│   └── i_security_service.dart       ← порт
+└── mock/
+    └── mock_security_service.dart    ← мок рядом с портом
+
+aq_schema/lib/data_layer/
+├── repositories/
+│   └── direct_repository.dart        ← порт
+└── mock/
+    └── in_memory_direct_repository.dart  ← мок рядом с портом
+      ]]></structure>
+    </mock_location>
+
+    <testing_barrels>
+      <rule>
+        Каждый домен в aq_schema имеет отдельный testing barrel.
+        Пакет подключает один файл — получает все моки домена.
+      </rule>
+      <examples>
+        aq_schema/lib/security_testing.dart  — все моки security
+        aq_schema/lib/data_testing.dart      — все моки data layer
+        aq_schema/lib/cache_testing.dart     — все моки cache
+      </examples>
+      <usage><![CDATA[
+// В тестах любого пакета:
+import 'package:aq_schema/security_testing.dart';
+import 'package:aq_schema/data_testing.dart';
+
+// Используем моки — без dart_vault, без aq_security
+final repo = InMemoryDirectRepository<StorableUser>();
+final auth = MockSecurityService.alwaysAllow();
+      ]]></usage>
+    </testing_barrels>
+
+    <mock_quality>
+      <rule>Мок — не просто заглушка. Каждый мок покрывает конкретный сценарий.</rule>
+      <examples><![CDATA[
+MockSecurityService.alwaysAllow()   — всегда разрешает доступ
+MockSecurityService.alwaysDeny()    — всегда запрещает
+MockSecurityService.forUser(userId) — разрешает только конкретному пользователю
+InMemoryDirectRepository<T>         — полноценное in-memory хранилище
+      ]]></examples>
+    </mock_quality>
+
+    <forbidden>
+      <item>Импорт пакета-реализации в тестах другого пакета</item>
+      <item>import 'package:dart_vault/...' в тестах aq_security</item>
+      <item>import 'package:aq_security/...' в тестах dart_vault</item>
+    </forbidden>
+
+  </layer_isolation>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 2: TECH DEBT — ЗАПРОСЫ МЕЖДУ СЛОЯМИ -->
+  <!-- ============================================ -->
+
+  <tech_debt_system>
+    <title>Запросы функционала между пакетами — через tech_debt в aq_schema</title>
+
+    <principle>
+      Если пакету A нужно что-то от пакета B — A создаёт задачу в aq_schema/tech_debt/for_B/.
+      Команда B открывает свою папку, видит задачи, реализует, кладёт ответ.
+      Пакеты не общаются напрямую — только через aq_schema.
+    </principle>
+
+    <folder_structure><![CDATA[
+aq_schema/tech_debt/
+├── for_data_layer/          ← задачи для команды dart_vault
+│   ├── TD-4_ttl-support/    ← каждая задача — отдельная папка
+│   │   ├── request.md       ← запрос (создаёт запрашивающий)
+│   │   ├── scenario.md      ← сценарий использования (создаёт запрашивающий)
+│   │   └── response.md      ← ответ + как использовать (создаёт исполнитель)
+│   └── archive/             ← закрытые задачи
+│       └── TD-2_distributed-lock/
+├── for_security/
+├── for_graph_engine/
+└── for_tools/
+    ]]></folder_structure>
+
+    <naming>
+      <format>TD-{N}_{короткое-название-kebab-case}</format>
+      <numbering>
+        Номера сквозные по всем папкам tech_debt/ включая archive/.
+        Следующий номер = max существующего + 1.
+        Гарантирует уникальность и хронологию.
+      </numbering>
+    </naming>
+
+    <lifecycle>
+      <stage name="open">
+        <actor>Запрашивающий</actor>
+        <action>Создаёт папку TD-N_name/ с request.md и scenario.md</action>
+      </stage>
+
+      <stage name="in-progress">
+        <actor>Исполнитель</actor>
+        <action>Видит папку → реализует → кладёт response.md рядом</action>
+      </stage>
+
+      <stage name="review">
+        <actor>Запрашивающий</actor>
+        <action>Читает response.md → внедряет → проверяет → задаёт вопросы если нужно</action>
+      </stage>
+
+      <stage name="done">
+        <actor>Запрашивающий (не исполнитель!)</actor>
+        <action>
+          Перемещает всю папку в archive/.
+          Архивирует только запрашивающий — это подтверждение что принял работу.
+        </action>
+      </stage>
+    </lifecycle>
+
+    <important>
+      Исполнитель НЕ архивирует задачу.
+      Только запрашивающий подтверждает закрытие — переносом в archive/.
+    </important>
+
+  </tech_debt_system>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 3: СТРУКТУРА ФАЙЛОВ TD ЗАДАЧИ -->
+  <!-- ============================================ -->
+
+  <td_file_structure>
+
+    <file name="request.md">
+      <created_by>Запрашивающий</created_by>
+      <template><![CDATA[
+# TD-N: Название
+
+**От:** aq_security
+**Кому:** data_layer
+**Приоритет:** HIGH / MEDIUM / LOW
+**Статус:** open
+
+---
+
+## Контекст
+
+Почему это нужно. Какая проблема решается. Что сейчас не работает или работает плохо.
+
+## Текущее состояние
+
+Что есть сейчас — код, интерфейс, поведение.
+
+## Что нужно
+
+Конкретный контракт:
+- Сигнатуры новых методов
+- Ожидаемое поведение
+- Edge cases
+
+## Что НЕ нужно менять
+
+Явные границы задачи — что трогать не нужно.
+      ]]></template>
+    </file>
+
+    <file name="scenario.md">
+      <created_by>Запрашивающий</created_by>
+      <template><![CDATA[
+# Сценарий использования TD-N
+
+## Как будет использоваться
+
+Реальный код со стороны запрашивающего пакета.
+Показывает как именно будет вызываться новый функционал.
+
+```dart
+// Пример использования нового API
+final result = await repo.findWithTtl(id);
+```
+
+## Ожидаемое поведение
+
+Что должно происходить в каждом случае.
+      ]]></template>
+    </file>
+
+    <file name="response.md">
+      <created_by>Исполнитель</created_by>
+      <template><![CDATA[
+# Ответ на TD-N
+
+**Статус:** done
+**Версия:** 1.2.0
+
+---
+
+## Что реализовано
+
+Описание реализации. Что добавлено, что изменено.
+
+## Как использовать
+
+Конкретный код — как подключить, инициализировать, вызвать.
+
+```dart
+// Готовый пример
+```
+
+## Ограничения и отличия от запроса
+
+Что не вошло. Что реализовано иначе чем запрошено. Почему.
+
+## Мок для тестов
+
+Где лежит мок для тестирования без реальной реализации.
+      ]]></template>
+    </file>
+
+  </td_file_structure>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 4: ОТВЕТСТВЕННОСТЬ ЗА МОК -->
+  <!-- ============================================ -->
+
+  <mock_responsibility>
+    <title>Порт без мока — неполный контракт</title>
+
+    <rule>
+      Команда объявляющая порт в aq_schema обязана:
+      1. Объявить интерфейс (порт)
+      2. Создать мок рядом в папке mock/
+      3. Добавить мок в testing barrel домена
+    </rule>
+
+    <checklist>
+      <item>Интерфейс объявлен в interfaces/</item>
+      <item>Мок создан в mock/ рядом с интерфейсом</item>
+      <item>Мок экспортируется через {domain}_testing.dart</item>
+      <item>Мок покрывает минимум 2 сценария (allow/deny, found/not-found и т.д.)</item>
+    </checklist>
+
+    <forbidden>
+      Объявить порт и не поставить мок.
+      Мок в пакете-реализации (dart_vault, aq_security) — только в aq_schema.
+    </forbidden>
+
+  </mock_responsibility>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 5: ПРАВИЛА ДЛЯ АГЕНТА -->
+  <!-- ============================================ -->
+
+  <agent_rules>
+
+    <rule id="check_td_before_work">
+      <title>Перед началом работы над пакетом — проверить tech_debt</title>
+      <steps>
+        1. Открыть aq_schema/tech_debt/for_{package}/
+        2. Прочитать все папки без response.md — это открытые задачи
+        3. Если задача релевантна текущей работе — реализовать и добавить response.md
+      </steps>
+    </rule>
+
+    <rule id="create_td_for_requests">
+      <title>Нужен функционал от другого пакета — создать TD</title>
+      <steps>
+        1. Определить следующий номер (max по всем папкам + 1)
+        2. Создать папку aq_schema/tech_debt/for_{target}/TD-N_name/
+        3. Создать request.md и scenario.md
+        4. НЕ ждать — продолжать работу с моком
+      </steps>
+    </rule>
+
+    <rule id="use_mocks_in_tests">
+      <title>В тестах — только моки из aq_schema</title>
+      <forbidden>
+        Импортировать пакет-реализацию в тестах другого пакета.
+      </forbidden>
+      <correct>
+        import 'package:aq_schema/security_testing.dart';
+        import 'package:aq_schema/data_testing.dart';
+      </correct>
+    </rule>
+
+    <rule id="archive_only_by_requester">
+      <title>Архивирует только запрашивающий</title>
+      <condition>
+        Папка TD переносится в archive/ только после того как запрашивающий:
+        - Прочитал response.md
+        - Внедрил реализацию
+        - Убедился что всё работает
+      </condition>
+    </rule>
+
+  </agent_rules>
+
+  <!-- ============================================ -->
+  <!-- ПРИМЕРЫ -->
+  <!-- ============================================ -->
+
+  <examples>
+
+    <example name="request_new_feature">
+      <description>aq_security запрашивает TTL support у data layer</description>
+      <steps><![CDATA[
+# 1. Найти следующий номер
+ls aq_schema/tech_debt/for_data_layer/        # TD-2, TD-3 → следующий TD-4
+
+# 2. Создать папку
+mkdir aq_schema/tech_debt/for_data_layer/TD-4_ttl-support/
+
+# 3. Создать request.md + scenario.md
+
+# 4. Продолжить работу с InMemoryRevokedTokenRepository (мок)
+# НЕ ждать реализации от data layer
+      ]]></steps>
+    </example>
+
+    <example name="implement_and_respond">
+      <description>Команда data layer реализует TD-4 и отвечает</description>
+      <steps><![CDATA[
+# 1. Открыть aq_schema/tech_debt/for_data_layer/
+# 2. Найти папки без response.md → TD-4_ttl-support/
+# 3. Прочитать request.md + scenario.md
+# 4. Реализовать
+# 5. Создать response.md в той же папке
+# НЕ перемещать в archive — это делает запрашивающий
+      ]]></steps>
+    </example>
+
+    <example name="close_td">
+      <description>aq_security принимает реализацию и закрывает задачу</description>
+      <steps><![CDATA[
+# 1. Прочитать response.md
+# 2. Внедрить согласно инструкции
+# 3. Убедиться что работает
+# 4. Переместить папку в archive
+mv aq_schema/tech_debt/for_data_layer/TD-4_ttl-support \
+   aq_schema/tech_debt/for_data_layer/archive/
+      ]]></steps>
+    </example>
+
+  </examples>
+
+</inter_layer_communication_rules>

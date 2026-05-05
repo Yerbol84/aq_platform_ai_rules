@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dart_package_hygiene_rules version="1.0">
+
+  <!--
+    Правила гигиены Dart пакетов.
+    Извлечены из практики рефакторинга aq_security.
+    Дополняют package_design_rules.xml и agent_framework.xml.
+  -->
+
+  <!-- ============================================ -->
+  <!-- ЗАВИСИМОСТИ -->
+  <!-- ============================================ -->
+
+  <rule id="no_transport_in_dependencies">
+    <title>Транспортный слой не входит в зависимости пакета</title>
+    <principle>
+      shelf, shelf_router, grpc, fastapi — это транспорт.
+      Транспорт подключает приложение, не пакет.
+      Пакет содержит бизнес-логику — она не знает о HTTP.
+    </principle>
+    <correct>
+      Приложение: dependencies: shelf, aq_security
+      Пакет aq_security: dependencies: aq_schema, http, crypto
+    </correct>
+    <incorrect>
+      Пакет aq_security: dependencies: shelf, shelf_router  ← ЗАПРЕЩЕНО
+    </incorrect>
+    <consequence>
+      Если транспорт в зависимостях пакета — пакет нельзя использовать
+      без конкретного HTTP фреймворка. Это нарушает переносимость.
+    </consequence>
+  </rule>
+
+  <rule id="no_data_layer_in_security">
+    <title>Security layer не зависит от data layer</title>
+    <principle>
+      dart_vault, postgres, redis — это data layer.
+      Security layer не знает о конкретных хранилищах.
+      Взаимодействие только через IDataLayer.instance или порты из aq_schema.
+    </principle>
+    <incorrect>
+      # pubspec.yaml aq_security
+      dependencies:
+        dart_vault:
+          path: ../dart_vault_package   ← ЗАПРЕЩЕНО
+    </incorrect>
+    <correct>
+      Security layer объявляет интерфейсы (IUserRepository, ISessionRepository).
+      Приложение инжектирует реализации через AuthServerRepos.
+    </correct>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- АНАЛИЗ КОДА -->
+  <!-- ============================================ -->
+
+  <rule id="read_constructors_before_use">
+    <title>Читать конструктор модели перед использованием</title>
+    <principle>
+      Перед созданием экземпляра любой модели — прочитать её конструктор.
+      Не угадывать имена параметров. Не копировать из памяти.
+    </principle>
+    <checklist>
+      ☐ Какие поля обязательны (required)?
+      ☐ Какие поля опциональны?
+      ☐ Какие enum значения существуют?
+      ☐ Есть ли поле X или оно называется иначе (tenantId vs tid)?
+    </checklist>
+    <example>
+      AqTokenClaims: поле называется tid, не tenantId
+      IdentityProvider: значение emailPassword, не email
+      AqUser: нет поля passwordHash — хранится отдельно
+    </example>
+    <when>
+      Особенно важно при работе с чужой кодовой базой
+      и при написании примеров/тестов.
+    </when>
+  </rule>
+
+  <rule id="analysis_options_exclude_is_antipattern">
+    <title>analysis_options exclude — антипаттерн</title>
+    <principle>
+      Исключение файлов из анализа через analysis_options.yaml — это
+      скрытие проблемы, не её решение.
+      Если файл нельзя проанализировать — его зависимости должны быть
+      в pubspec.yaml или файл должен быть перемещён.
+    </principle>
+    <correct_alternatives>
+      1. Добавить зависимость в pubspec.yaml
+      2. Переместить файл в отдельный пакет-адаптер
+      3. Удалить файл если он не нужен
+    </correct_alternatives>
+    <exception>
+      Допустимо исключать: generated файлы (*.g.dart), legacy код
+      помеченный явным TODO с датой удаления.
+    </exception>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- ПРИМЕРЫ -->
+  <!-- ============================================ -->
+
+  <rule id="examples_need_own_pubspec">
+    <title>Примеры в example/ — отдельный пакет со своим pubspec.yaml</title>
+    <principle>
+      example/ — это не часть lib/. Примеры могут иметь зависимости
+      которых нет в основном пакете (shelf, flutter, etc.).
+      Без своего pubspec.yaml примеры анализируются в контексте
+      основного пакета и ломают его анализ.
+    </principle>
+    <structure><![CDATA[
+my_package/
+  lib/                    # основной пакет
+  example/
+    pubspec.yaml          # ← обязательно
+    vault_example.dart
+    server_example.dart
+    ]]></structure>
+    <pubspec_template><![CDATA[
+name: my_package_examples
+publish_to: none
+dependencies:
+  my_package:
+    path: ..
+    ]]></pubspec_template>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- DART СПЕЦИФИКА -->
+  <!-- ============================================ -->
+
+  <rule id="fire_and_forget_pattern">
+    <title>Fire-and-forget в Dart — правильный паттерн</title>
+    <principle>
+      .catchError() на типизированном Future требует возврата значения
+      того же типа. Это не JavaScript.
+      Правильный паттерн для fire-and-forget:
+    </principle>
+    <correct><![CDATA[
+unawaited(Future(() async {
+  try {
+    await someCall();
+  } catch (_) {}
+}));
+    ]]></correct>
+    <incorrect><![CDATA[
+// ❌ catchError должен вернуть http.Response — не работает
+unawaited(http.post(...).catchError((e) {}));
+    ]]></incorrect>
+  </rule>
+
+  <rule id="flow_analysis_closures">
+    <title>Flow analysis не работает для полей класса внутри замыканий</title>
+    <principle>
+      Dart flow analysis промоутит nullable поле до non-null после null check,
+      но только в той же функции и только для локальных переменных.
+      Внутри Future/closure поле может снова стать nullable.
+    </principle>
+    <correct><![CDATA[
+// ✅ Сохранить в локальную переменную перед closure
+if (_endpoint == null) return;
+final endpoint = _endpoint; // non-null локальная переменная
+unawaited(Future(() async {
+  await http.post(Uri.parse(endpoint)); // ✅ endpoint точно non-null
+}));
+    ]]></correct>
+    <incorrect><![CDATA[
+// ❌ _endpoint может быть null внутри closure
+if (_endpoint == null) return;
+unawaited(Future(() async {
+  await http.post(Uri.parse(_endpoint!)); // ❌ нужен !
+}));
+    ]]></incorrect>
+  </rule>
+
+  <rule id="switch_exhaustiveness">
+    <title>default в switch по enum — убирать если все кейсы покрыты</title>
+    <principle>
+      В Dart 3+ switch по sealed class или enum с exhaustiveness checking
+      default clause становится unreachable если все кейсы покрыты.
+      Это warning. Убирать default — правильно.
+      Это также позволяет компилятору предупреждать при добавлении нового значения enum.
+    </principle>
+  </rule>
+
+</dart_package_hygiene_rules>

@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<documentation_rules version="1.0">
+
+  <!--
+    Правила организации документации в пакетах AQ Platform.
+    Область применения: любой пакет с папкой docs/
+  -->
+
+  <!-- ============================================ -->
+  <!-- СТРУКТУРА ПАПКИ docs/ -->
+  <!-- ============================================ -->
+
+  <structure>
+    <title>Единая структура docs/ для всех пакетов</title>
+
+    <layout><![CDATA[
+docs/
+├── README.md          # Индекс: что где лежит
+├── working/           # Активные рабочие папки (только папки, не файлы!)
+├── strategy/          # Стратегические и архитектурные документы
+└── archive/           # Завершённые рабочие папки (только папки целиком)
+    ]]></layout>
+
+    <rules>
+      <rule>В корне docs/ — только README.md и три подпапки</rule>
+      <rule>В working/ — только рабочие папки, никаких одиночных файлов</rule>
+      <rule>В strategy/ — файлы и папки со стратегическими документами</rule>
+      <rule>В archive/ — только завершённые рабочие папки целиком</rule>
+    </rules>
+  </structure>
+
+  <!-- ============================================ -->
+  <!-- РАБОЧАЯ ПАПКА (WORK FOLDER) -->
+  <!-- ============================================ -->
+
+  <work_folder>
+    <title>Рабочая папка — единица работы</title>
+
+    <principle>
+      Каждая большая работа = одна папка в docs/working/.
+      Документы по одному НИКОГДА не перемещаются — только вся папка целиком.
+    </principle>
+
+    <naming>
+      <format>YYYY-MM_короткое-название-kebab-case</format>
+      <examples>
+        2026-05_cache-refactor
+        2026-05_rbac-iam-integration
+        2026-06_token-rotation
+      </examples>
+    </naming>
+
+    <required_structure><![CDATA[
+docs/working/2026-05_cache-refactor/
+├── analysis.md        # Что делаем, зачем, текущее состояние — СОЗДАЁТСЯ ПЕРВЫМ
+├── plan.md            # Как делаем, шаги, критерии готовности — СОЗДАЁТСЯ ДО РАБОТЫ
+├── sprint_1/          # (опционально — если есть промежуточные чекпоинты)
+│   ├── analysis.md
+│   ├── plan.md
+│   └── report.md
+├── sprint_N/
+│   ├── analysis.md
+│   ├── plan.md
+│   └── report.md
+└── report.md          # Финальный отчёт — СОЗДАЁТСЯ ПОСЛЕДНИМ
+    ]]></required_structure>
+
+    <file_rules>
+
+      <file name="analysis.md">
+        <when>До начала работы</when>
+        <contains>
+          - Текущее состояние (что есть сейчас)
+          - Проблема или цель (что не так / чего хотим)
+          - Обоснование (почему это важно)
+          - Ограничения и риски
+        </contains>
+        <mandatory>true</mandatory>
+      </file>
+
+      <file name="plan.md">
+        <when>До начала работы, после analysis.md</when>
+        <contains>
+          - Конкретные шаги с файлами/компонентами
+          - Критерии готовности (Definition of Done)
+          - Список спринтов если работа большая
+          - Обязательная финальная проверка (dart analyze / тесты)
+        </contains>
+        <mandatory>true</mandatory>
+      </file>
+
+      <file name="report.md">
+        <when>После завершения всей работы</when>
+        <contains>
+          - Что было сделано (список изменений)
+          - Результат проверки (dart analyze, тесты)
+          - Отклонения от плана (если были)
+          - Что осталось / tech debt (если есть)
+        </contains>
+        <mandatory>true</mandatory>
+        <note>Без report.md работа считается незавершённой</note>
+      </file>
+
+    </file_rules>
+
+    <sprint_rules>
+      <when_to_use>
+        Спринты создаются если:
+        - Работа занимает более одной сессии
+        - Есть промежуточные чекпоинты (можно остановиться и проверить)
+        - Разные части работы независимы
+      </when_to_use>
+      <when_not_to_use>
+        Спринты НЕ нужны если работа небольшая и делается за одну сессию
+      </when_not_to_use>
+      <structure>
+        Каждый спринт — папка sprint_N/ с теми же тремя файлами:
+        analysis.md, plan.md, report.md
+      </structure>
+    </sprint_rules>
+
+  </work_folder>
+
+  <!-- ============================================ -->
+  <!-- ЖИЗНЕННЫЙ ЦИКЛ РАБОЧЕЙ ПАПКИ -->
+  <!-- ============================================ -->
+
+  <lifecycle>
+    <title>Жизненный цикл рабочей папки</title>
+
+    <stages>
+      <stage name="active">
+        <location>docs/working/YYYY-MM_name/</location>
+        <condition>Работа в процессе. report.md ещё не создан.</condition>
+      </stage>
+
+      <stage name="completed">
+        <location>docs/working/YYYY-MM_name/</location>
+        <condition>report.md создан. Работа завершена и проверена.</condition>
+        <next_action>Переместить всю папку в docs/archive/</next_action>
+      </stage>
+
+      <stage name="archived">
+        <location>docs/archive/YYYY-MM_name/</location>
+        <condition>Работа завершена. Папка перемещена целиком.</condition>
+      </stage>
+    </stages>
+
+    <transition_rule>
+      При архивировании — перемещается ВСЯ папка целиком.
+      Никогда не перемещаются отдельные файлы из рабочей папки.
+    </transition_rule>
+
+    <command_example><![CDATA[
+# Правильно: перемещаем всю папку
+mv docs/working/2026-05_cache-refactor docs/archive/
+
+# Неправильно: перемещаем отдельные файлы
+mv docs/working/2026-05_cache-refactor/report.md docs/archive/  ← ЗАПРЕЩЕНО
+    ]]></command_example>
+
+  </lifecycle>
+
+  <!-- ============================================ -->
+  <!-- STRATEGY/ -->
+  <!-- ============================================ -->
+
+  <strategy_folder>
+    <title>Папка strategy/ — долгосрочные документы</title>
+
+    <contains>
+      - Архитектурные решения (ADR)
+      - Стратегии развития компонентов
+      - Бизнес-логика и доменные правила
+      - Production Readiness планы
+    </contains>
+
+    <does_not_contain>
+      - Отчёты о выполненных задачах
+      - Планы конкретных рефакторингов
+      - Временные заметки
+    </does_not_contain>
+
+    <update_rule>
+      Документы в strategy/ обновляются по месту.
+      Старые версии не архивируются — используется git history.
+    </update_rule>
+  </strategy_folder>
+
+  <!-- ============================================ -->
+  <!-- ARCHIVE/ -->
+  <!-- ============================================ -->
+
+  <archive_folder>
+    <title>Папка archive/ — только завершённые рабочие папки</title>
+
+    <rule>В archive/ попадают только целые рабочие папки из working/</rule>
+    <rule>Одиночные файлы в archive/ не создаются</rule>
+    <rule>Документы из archive/ не редактируются</rule>
+    <rule>Из archive/ ничего не удаляется</rule>
+  </archive_folder>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛА ДЛЯ АГЕНТА -->
+  <!-- ============================================ -->
+
+  <agent_rules>
+
+    <rule id="create_work_folder_before_work">
+      <title>Создать рабочую папку до начала большой работы</title>
+      <trigger>
+        Задача затрагивает более 3 файлов ИЛИ займёт более одной сессии
+        ИЛИ пользователь явно просит задокументировать работу
+      </trigger>
+      <steps>
+        1. Создать папку docs/working/YYYY-MM_name/
+        2. Создать analysis.md
+        3. Создать plan.md
+        4. Получить подтверждение пользователя
+        5. Приступить к работе
+      </steps>
+    </rule>
+
+    <rule id="report_after_work">
+      <title>Создать report.md после завершения работы</title>
+      <trigger>Работа завершена, проверка пройдена</trigger>
+      <steps>
+        1. Создать report.md в рабочей папке
+        2. Зафиксировать результат проверки (dart analyze / тесты)
+        3. Предложить пользователю архивировать папку
+      </steps>
+    </rule>
+
+    <rule id="never_move_single_files">
+      <title>Никогда не перемещать одиночные файлы из рабочей папки</title>
+      <forbidden>
+        Перемещение отдельных файлов из docs/working/*/
+        в docs/archive/ или docs/strategy/
+      </forbidden>
+      <correct>
+        Перемещать только всю папку целиком
+      </correct>
+    </rule>
+
+    <rule id="archive_only_completed">
+      <title>Архивировать только завершённые папки</title>
+      <condition>
+        Папка может быть архивирована только если в ней есть report.md
+      </condition>
+      <on_missing_report>
+        Предупредить: "Рабочая папка не имеет report.md.
+        Создайте отчёт перед архивированием."
+      </on_missing_report>
+    </rule>
+
+  </agent_rules>
+
+  <!-- ============================================ -->
+  <!-- ПРИМЕРЫ -->
+  <!-- ============================================ -->
+
+  <examples>
+
+    <example type="correct" name="new_work_start">
+      <description>Начало новой большой работы</description>
+      <actions><![CDATA[
+# 1. Создать рабочую папку
+mkdir docs/working/2026-05_iam-cache-integration/
+
+# 2. Создать analysis.md — ЧТО и ЗАЧЕМ
+# 3. Создать plan.md — КАК и КОГДА
+
+# 4. Работать...
+
+# 5. После завершения — создать report.md
+# 6. Переместить всю папку в archive
+mv docs/working/2026-05_iam-cache-integration docs/archive/
+      ]]></actions>
+    </example>
+
+    <example type="incorrect" name="files_without_folder">
+      <description>Создание документов без рабочей папки</description>
+      <incorrect><![CDATA[
+# ❌ Нельзя создавать одиночные файлы в working/
+docs/working/CACHE_PLAN.md
+docs/working/CACHE_REPORT.md
+      ]]></incorrect>
+      <correct><![CDATA[
+# ✅ Только через рабочую папку
+docs/working/2026-05_cache-refactor/plan.md
+docs/working/2026-05_cache-refactor/report.md
+      ]]></correct>
+    </example>
+
+    <example type="incorrect" name="partial_archive">
+      <description>Частичное архивирование</description>
+      <incorrect><![CDATA[
+# ❌ Нельзя перемещать отдельные файлы
+mv docs/working/2026-05_cache-refactor/report.md docs/archive/
+      ]]></incorrect>
+      <correct><![CDATA[
+# ✅ Только вся папка целиком
+mv docs/working/2026-05_cache-refactor docs/archive/
+      ]]></correct>
+    </example>
+
+  </examples>
+
+</documentation_rules>

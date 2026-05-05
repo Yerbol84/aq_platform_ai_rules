@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<security_layer_rules version="1.0">
+
+  <!--
+    Правила архитектуры Security Layer платформы AQ.
+    Стек: Dart / Flutter / HTTP (Shelf)
+    Область: aq_schema/lib/security/ + aq_security/
+  -->
+
+  <!-- ============================================ -->
+  <!-- РАЗДЕЛЕНИЕ КОНТРАКТОВ И РЕАЛИЗАЦИИ -->
+  <!-- ============================================ -->
+
+  <schema_vs_implementation>
+    <title>aq_schema содержит ТОЛЬКО контракты</title>
+
+    <allowed_in_schema>
+      - abstract interface class
+      - final data classes (модели)
+      - enums
+      - JSON serialization в моделях (simple getters)
+    </allowed_in_schema>
+
+    <forbidden_in_schema>
+      - Конкретные реализации (классы без abstract interface)
+      - Зависимости на http, shelf, postgres, любые сетевые пакеты
+      - Бизнес-логика внутри моделей
+    </forbidden_in_schema>
+
+    <structure>
+      <schema_path>aq_schema/lib/security/</schema_path>
+      <impl_path>aq_security/lib/src/</impl_path>
+      <rule>Интерфейс в schema → реализация в пакете. Никогда наоборот.</rule>
+    </structure>
+  </schema_vs_implementation>
+
+  <!-- ============================================ -->
+  <!-- ФОРМАТ ПРАВ ДОСТУПА -->
+  <!-- ============================================ -->
+
+  <permission_format>
+    <title>Permission = resource:action (только два сегмента)</title>
+
+    <correct>
+      'projects:read'
+      'users:delete'
+      'admin:*'
+    </correct>
+
+    <forbidden>
+      'projects:read:own'      <!-- scope встроен в ключ — ЗАПРЕЩЕНО -->
+      'users:delete:tenant'    <!-- три сегмента — ЗАПРЕЩЕНО -->
+    </forbidden>
+
+    <scope_rule>
+      Scope — отдельный механизм. Передаётся через AccessContext.userScopes,
+      НЕ встраивается в permission key.
+      Если встречаешь resource:action:scope → исправляй на resource:action,
+      scope выноси в context.
+    </scope_rule>
+  </permission_format>
+
+  <!-- ============================================ -->
+  <!-- ПОРЯДОК ПРОВЕРКИ ДОСТУПА (три уровня) -->
+  <!-- ============================================ -->
+
+  <access_control_order>
+    <title>Три уровня проверки — строгий порядок</title>
+
+    <levels>
+      <level number="1" name="RBAC">Роли/права — быстро, из кэша</level>
+      <level number="2" name="RLAC">Resource-level (resource_permissions) — только если RBAC дал YES</level>
+      <level number="3" name="PBAC">Политики + контекст — только если RBAC дал YES</level>
+    </levels>
+
+    <rule>Любой уровень может вернуть DENY → итог DENY.</rule>
+    <rule>Нет явного прохождения всех уровней → DENY by default.</rule>
+    <rule>Неизвестная коллекция/ресурс → DENY, не Exception.</rule>
+
+    <example_deny>
+      <correct><![CDATA[
+default:
+  return AccessDecision.deny(reason: 'Unknown collection: $collection');
+      ]]></correct>
+      <incorrect><![CDATA[
+default:
+  throw UnknownCollectionException('Unknown collection: $collection');
+      ]]></incorrect>
+    </example_deny>
+  </access_control_order>
+
+  <!-- ============================================ -->
+  <!-- ИНИЦИАЛИЗАЦИЯ СИНГЛТОНОВ -->
+  <!-- ============================================ -->
+
+  <singleton_initialization>
+    <title>Все синглтоны инициализируются через единый facade</title>
+
+    <rule>
+      Пакет предоставляет единый facade (например AqSecurity.init()).
+      Все синглтоны security layer инициализируются ТОЛЬКО внутри него.
+      Прямые вызовы initialize() снаружи facade — ЗАПРЕЩЕНЫ.
+    </rule>
+
+    <example>
+      <correct><![CDATA[
+// Единственный способ инициализации:
+await AqSecurity.init(config: config);
+
+// Внутри AqSecurity.init() — все три:
+ISecurityService.initialize(impl);
+IVaultSecurityProtocol.initialize(impl);
+IAuthContext.initialize(impl);
+      ]]></correct>
+      <incorrect><![CDATA[
+// Прямые вызовы снаружи — ЗАПРЕЩЕНЫ:
+IVaultSecurityProtocol.initialize(myImpl);
+IAuthContext.initialize(myImpl);
+      ]]></incorrect>
+    </example>
+  </singleton_initialization>
+
+  <!-- ============================================ -->
+  <!-- АУДИТ — FIRE AND FORGET -->
+  <!-- ============================================ -->
+
+  <audit_rules>
+    <title>Аудит никогда не блокирует критический путь</title>
+
+    <rule>
+      Любой вызов logOperation(), logAccess(), logAudit() в критическом пути —
+      fire-and-forget через unawaited().
+      Если audit упал — логируем ошибку, НЕ пробрасываем её дальше.
+    </rule>
+
+    <example>
+      <correct><![CDATA[
+unawaited(_auditClient.logOperation(...));
+      ]]></correct>
+      <incorrect><![CDATA[
+await _auditClient.logOperation(...); // блокирует — ЗАПРЕЩЕНО
+      ]]></incorrect>
+    </example>
+  </audit_rules>
+
+  <!-- ============================================ -->
+  <!-- БЕЗОПАСНОСТЬ СЕКРЕТОВ -->
+  <!-- ============================================ -->
+
+  <secrets_safety>
+    <title>Секреты никогда не попадают в логи</title>
+
+    <forbidden_in_logs>
+      - jwtSecret
+      - encryptionKey
+      - token values
+      - любые credentials
+    </forbidden_in_logs>
+
+    <allowed_for_diagnostics><![CDATA[
+// Только первые 8 символов для диагностики:
+config.jwtSecret.substring(0, 8) + '...'
+    ]]></allowed_for_diagnostics>
+  </secrets_safety>
+
+  <!-- ============================================ -->
+  <!-- ЗАГЛУШКИ И ТЕСТОВЫЙ КОД -->
+  <!-- ============================================ -->
+
+  <stubs_and_testing>
+
+    <rule id="no_unimplemented_error">
+      <title>UnimplementedError запрещён в production коде</title>
+      <rule>
+        throw UnimplementedError() — временная заглушка.
+        Задача: заменить реальной реализацией.
+        Исключение: тестовые файлы и явные TODO-stub файлы.
+      </rule>
+    </rule>
+
+    <rule id="noop_marking">
+      <title>NoOp заглушки помечаются явно</title>
+      <rule>
+        Любой класс-заглушка (NoOp, Fake, Stub) обязан:
+        1. Иметь @visibleForTesting или комментарий // FOR TESTING ONLY
+        2. НЕ регистрироваться как production singleton
+      </rule>
+    </rule>
+
+  </stubs_and_testing>
+
+  <!-- ============================================ -->
+  <!-- КЭШИРОВАНИЕ -->
+  <!-- ============================================ -->
+
+  <caching>
+    <title>TTL кэша берётся из конфига, не хардкодится</title>
+
+    <example>
+      <correct><![CDATA[
+AccessCache(ttl: config.rbacCacheTtl)
+      ]]></correct>
+      <incorrect><![CDATA[
+AccessCache() // hardcoded default — ЗАПРЕЩЕНО
+      ]]></incorrect>
+    </example>
+  </caching>
+
+  <!-- ============================================ -->
+  <!-- РЕГИСТРАЦИЯ ДОМЕНОВ -->
+  <!-- ============================================ -->
+
+  <domain_registration>
+    <title>Каждая коллекция регистрируется ровно один раз</title>
+
+    <rule>
+      В списке доменов (AqSecurityDomains.all или аналог) каждая коллекция
+      появляется РОВНО ОДИН РАЗ.
+      Перед добавлением нового домена — проверить что такая коллекция
+      не зарегистрирована уже.
+    </rule>
+  </domain_registration>
+
+  <!-- ============================================ -->
+  <!-- SQL INJECTION -->
+  <!-- ============================================ -->
+
+  <sql_injection>
+    <title>SQL Injection предотвращается параметризованными запросами, не regex</title>
+
+    <rule>
+      Не добавлять regex-проверки на SQL injection в security layer.
+      Это ложная защита.
+      SQL injection предотвращается параметризованными запросами в data layer.
+    </rule>
+  </sql_injection>
+
+  <!-- ============================================ -->
+  <!-- ИЗМЕНЕНИЕ ИНТЕРФЕЙСОВ -->
+  <!-- ============================================ -->
+
+  <interface_changes>
+    <title>Не ломать компиляцию при изменении интерфейсов</title>
+
+    <rule>
+      При изменении интерфейса в aq_schema:
+      1. Создать новый метод
+      2. Deprecated старый
+      3. Удалить старый — в отдельном шаге после обновления всех реализаций
+    </rule>
+  </interface_changes>
+
+  <!-- ============================================ -->
+  <!-- ПОРЯДОК ФАЗ РЕФАКТОРИНГА -->
+  <!-- ============================================ -->
+
+  <refactoring_phases>
+    <title>Порядок работы при рефакторинге security layer</title>
+
+    <phase number="0" name="Нулевой день">
+      Исправить критические нарушения: формат permissions, дубликаты доменов.
+      dart analyze → 0 errors.
+    </phase>
+
+    <phase number="1" name="Функциональность">
+      Заменить заглушки (UnimplementedError, NoOp) реальным кодом.
+      dart analyze → 0 errors.
+    </phase>
+
+    <phase number="2" name="Архитектура">
+      Привести структуру к стандарту: facade, синглтоны, разделение client/server.
+      dart analyze → 0 errors.
+    </phase>
+
+    <phase number="3" name="Качество">
+      Безопасность секретов, аудит fire-and-forget, кэш из конфига, тесты.
+      dart analyze → 0 errors.
+    </phase>
+
+    <rule>Не переходить к следующей фазе пока dart analyze не показывает 0 errors.</rule>
+  </refactoring_phases>
+
+  <!-- ============================================ -->
+  <!-- ТЕСТЫ -->
+  <!-- ============================================ -->
+
+  <testing>
+    <rule>Для каждого нового HttpXxxService — unit тест с mock HTTP server.</rule>
+    <rule>Для протокола безопасности — тест embedded режима и distributed режима.</rule>
+    <rule>После каждой фазы — dart analyze в обоих пакетах, 0 errors.</rule>
+  </testing>
+
+  <!-- ============================================ -->
+  <!-- ЧТО НЕ ТРОГАТЬ -->
+  <!-- ============================================ -->
+
+  <out_of_scope>
+    <rule>lib/graph/ в aq_schema — не зона security layer</rule>
+    <rule>lib/data_layer/ в aq_schema — только читаем интерфейсы</rule>
+    <rule>lib/sandbox/ в aq_schema — не зона security layer</rule>
+  </out_of_scope>
+
+  <!-- ============================================ -->
+  <!-- IVAULTSECURITYPROTOCOL — НАПРАВЛЕНИЕ ВЫЗОВА -->
+  <!-- ============================================ -->
+
+  <vault_security_protocol>
+    <title>IVaultSecurityProtocol — порт безопасности для data layer</title>
+
+    <direction>
+      Data layer вызывает security layer. НЕ наоборот.
+      dart_vault → IVaultSecurityProtocol → aq_security
+    </direction>
+
+    <two_modes>
+      <mode name="embedded">
+        Security и data layer в одном процессе.
+        IVaultSecurityProtocol проверяет права через AccessControlEngine напрямую.
+        Нет HTTP вызовов. Latency &lt; 1ms.
+        Используется: разработка, тесты, монолитные приложения.
+      </mode>
+      <mode name="distributed">
+        Security и data layer на разных серверах.
+        IVaultSecurityProtocol делает HTTP introspection на каждую операцию.
+        Используется: production микросервисы.
+      </mode>
+    </two_modes>
+
+    <rule>
+      Режим выбирается при инициализации через SecurityMode.
+      Код data layer не меняется при смене режима.
+    </rule>
+
+    <token_verification>
+      extractClaims() без верификации подписи — только первый шаг.
+      Финальное решение о доступе принимается ТОЛЬКО после introspection
+      или локальной верификации подписи.
+      Нельзя принимать решение по не-верифицированным claims.
+    </token_verification>
+  </vault_security_protocol>
+
+  <!-- ============================================ -->
+  <!-- SESSION KIND — ОБЯЗАТЕЛЕН -->
+  <!-- ============================================ -->
+
+  <session_kind>
+    <title>SessionKind указывается явно при создании сессии</title>
+    <rule>
+      При создании AqSession всегда указывать kind явно.
+      Дефолт SessionKind.human скрывает ошибки:
+      service account получит human сессию без явной ошибки.
+    </rule>
+    <values>
+      human    — пользователь через UI
+      service  — API key / service account
+      workflow — выполняется граф
+      worker   — зарегистрированный worker
+    </values>
+  </session_kind>
+
+  <!-- ============================================ -->
+  <!-- IN-MEMORY РЕАЛИЗАЦИИ — FIRST-CLASS CITIZEN -->
+  <!-- ============================================ -->
+
+  <in_memory_implementations>
+    <title>Каждый порт security layer имеет in-memory реализацию</title>
+    <rule>
+      In-memory реализации — не заглушки, а полноценные реализации
+      для разработки, тестов и embedded режима.
+      Живут в lib/src/testing/.
+      Экспортируются из server barrel.
+    </rule>
+    <what_to_implement>
+      - InMemoryUserRepository
+      - InMemorySessionRepository
+      - InMemoryApiKeyRepository
+      - InMemoryRbacRoleRepository / UserRoleRepository / PolicyRepository
+      - InMemoryResourcePermissionService
+      - InMemoryVaultSecurityProtocol (embedded режим)
+    </what_to_implement>
+  </in_memory_implementations>
+
+</security_layer_rules>
