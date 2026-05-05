@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sandbox_tools_subject_rules version="1.0">
+
+  <!--
+    ГЛАВНЫЙ ПРИНЦИП ПЛАТФОРМЫ:
+    Всё для Subject, через Tools, на Sandbox.
+
+    Subject — тот кто использует (агент, граф, человек через чат)
+    Tools   — физика, возможности (LLM, fs, net, MCP, другие агенты)
+    Sandbox — пространство, изоляция (LocalFS, Docker, WarmPool)
+
+    Пользователь создаёт Sandbox → наполняет Tools → запускает Subject.
+    Subject отправляет запросы → Tools работают → результат возвращается.
+  -->
+
+  <!-- ============================================ -->
+  <!-- SANDBOX PLANE — пространство выполнения -->
+  <!-- ============================================ -->
+
+  <plane name="sandbox">
+    <role>Основообразующий сервис. Без него нет смысла в остальном.</role>
+    <responsibility>
+      - Создание и управление изолированным пространством (LocalFS, Docker)
+      - Capability enforcement (FsReadCap, FsWriteCap, NetOutCap, ProcSpawnCap)
+      - Lifecycle ресурсов (создание, dispose, cleanup orphaned)
+      - WarmPool — прогрев контейнеров для быстрого старта
+      - GitRepoProvisioner — клонирование и кеширование репозиториев
+    </responsibility>
+    <owns>
+      - ISandboxProvider — создание sandbox
+      - ISandboxHandle — управление конкретным sandbox
+      - SandboxResources — живые ресурсы (fs/net/proc), lifecycle
+      - RunContext — метаданные сессии (value object, БЕЗ живых ресурсов)
+      - ResourceManager — внутренний сервис, отслеживает и закрывает ресурсы
+    </owns>
+    <does_not_own>
+      - Инструменты (это Tool Plane)
+      - Субъекты (это Subject Plane)
+      - Бизнес-логику выполнения
+    </does_not_own>
+    <key_ports>
+      ISandboxProvider    — aq_schema/lib/sandbox/interfaces/i_sandbox_provider.dart
+    </key_ports>
+  </plane>
+
+  <!-- ============================================ -->
+  <!-- TOOL PLANE — физика, возможности -->
+  <!-- ============================================ -->
+
+  <plane name="tools">
+    <role>Возможности которые Subject использует внутри Sandbox.</role>
+    <responsibility>
+      - Реестр инструментов с версионированием (SemVer)
+      - Выполнение инструментов в контексте сессии (не создаёт новый sandbox!)
+      - CircuitBreaker — защита от каскадных отказов
+      - MCP — подключение внешних tool серверов
+      - Subject-as-Tool — Subject B как инструмент для Subject A
+    </responsibility>
+    <owns>
+      - IAQToolRegistrySimple — реестр инструментов
+      - IToolRepository — persistence инструментов
+      - IToolRuntimeExecutor — выполнение инструментов
+      - IToolHandlerRegistry — регистрация handlers (локальный для Tool Plane)
+      - IToolExecutorFactory — создание executor для Subject (локальный)
+      - SubjectSessionPool — пул сессий Subject-as-Tool
+    </owns>
+    <does_not_own>
+      - Sandbox (берёт RunContext + SandboxResources из Sandbox Plane)
+      - Субъектов (это Subject Plane)
+    </does_not_own>
+    <key_ports>
+      IAQToolRegistrySimple   — aq_schema/lib/tools/interfaces/i_aq_tool_registry_simple.dart
+      IToolRuntimeExecutor    — aq_schema/lib/tools/interfaces/i_tool_runtime_executor.dart
+      IToolHandlerRegistry    — aq_schema/lib/tools/interfaces/i_tool_handler_registry.dart
+      IToolExecutorFactory    — aq_schema/lib/tools/interfaces/i_tool_executor_factory.dart
+      IToolRepository         — aq_schema/lib/tools/interfaces/i_tool_repository.dart
+    </key_ports>
+    <anti_patterns>
+      <!-- Tool НЕ создаёт новый sandbox на каждый вызов (S-02 fix) -->
+      <!-- Tool НЕ знает о конкретном Subject который его вызывает -->
+      <!-- Tool output ограничен maxOutputBytes (P-07 fix) -->
+    </anti_patterns>
+  </plane>
+
+  <!-- ============================================ -->
+  <!-- SUBJECT PLANE — тот кто использует -->
+  <!-- ============================================ -->
+
+  <plane name="subject">
+    <role>Исполнитель. Получает задачу, использует Tools на Sandbox, возвращает результат.</role>
+    <responsibility>
+      - Регистрация субъектов (LLM агент, git_repo, docker_image, etc.)
+      - Граф зависимостей субъектов (циклы, max depth=3)
+      - Создание сессий выполнения
+      - Lifecycle сессий (create, send, dispose, orphaned cleanup)
+      - Subject-as-Tool — регистрация субъекта как инструмента
+      - Health checks субъектов
+      - Quota и rate limiting
+    </responsibility>
+    <owns>
+      - IAQSubjectRegistry — реестр субъектов
+      - ISubjectRepository — persistence субъектов
+      - ISubjectSessionRepository — persistence активных сессий
+      - ISubjectSessionFactory — создание сессий
+      - ISubjectExecutorRegistry — dispatch по SubjectKind
+      - IQuotaService — квоты на сессии
+    </owns>
+    <does_not_own>
+      - Sandbox (получает через ISandboxProvider)
+      - Tools (получает через IToolExecutorFactory)
+    </does_not_own>
+    <key_ports>
+      IAQSubjectRegistry          — aq_schema/lib/subject/interfaces/i_aq_subject_registry.dart
+      ISubjectRepository          — aq_schema/lib/subject/interfaces/i_subject_repository.dart
+      ISubjectSessionRepository   — aq_schema/lib/subject/interfaces/i_subject_session_repository.dart
+      ISubjectSessionFactory      — aq_schema/lib/subject/interfaces/i_subject_session_factory.dart
+      ISubjectExecutorRegistry    — aq_schema/lib/subject/interfaces/i_subject_executor.dart
+      IQuotaService               — aq_schema/lib/subject/interfaces/i_quota_service.dart
+    </key_ports>
+  </plane>
+
+  <!-- ============================================ -->
+  <!-- AQPlatformContext — глобальный инициализатор -->
+  <!-- ============================================ -->
+
+  <platform_context>
+    <role>
+      Глобальный инициализатор приложения.
+      Принимает реализации всех плоскостей, регистрирует порты.
+      Один на приложение (или zone-local для тестов).
+    </role>
+    <structure>
+      AQPlatformContext {
+        // Sandbox Plane
+        sandboxProvider: ISandboxProvider
+
+        // Tool Plane
+        toolRegistry: IAQToolRegistrySimple
+        toolRuntimeExecutor: IToolRuntimeExecutor
+        toolRepository: IToolRepository
+        toolHandlerRegistry: IToolHandlerRegistry
+        toolExecutorFactory: IToolExecutorFactory
+
+        // Subject Plane
+        subjectRegistry: IAQSubjectRegistry
+        subjectSessionFactory: ISubjectSessionFactory
+        subjectRepository: ISubjectRepository
+        subjectSessionRepository: ISubjectSessionRepository
+        subjectExecutorRegistry: ISubjectExecutorRegistry
+      }
+    </structure>
+    <rule>
+      Клиент обращается к сервису ТОЛЬКО через порт.
+      Один путь — через Interface.instance.
+      Interface.instance делегирует к AQPlatformContext.current.
+      Нет альтернативных путей доступа.
+    </rule>
+    <file>aq_schema/lib/core/aq_platform_context.dart</file>
+  </platform_context>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛА ВЗАИМОДЕЙСТВИЯ ПЛОСКОСТЕЙ -->
+  <!-- ============================================ -->
+
+  <interaction_rules>
+
+    <rule id="sandbox_is_foundation">
+      <title>Sandbox — основа, остальные плоскости зависят от него</title>
+      <correct>
+        Subject Plane запрашивает sandbox через ISandboxProvider.instance.create()
+        Tool Plane получает RunContext + SandboxResources из Subject Plane
+      </correct>
+      <forbidden>
+        Tool Plane создаёт новый sandbox на каждый tool call
+        Subject Plane напрямую управляет Docker контейнерами
+      </forbidden>
+    </rule>
+
+    <rule id="tools_work_in_session_context">
+      <title>Tools работают в контексте сессии, не создают свой sandbox</title>
+      <correct>
+        IToolRuntimeExecutor.execute(contract, input, sessionContext, resources)
+        — tools используют переданный контекст
+      </correct>
+      <forbidden>
+        IToolHandler создаёт ISandboxProvider.instance.create() внутри execute()
+      </forbidden>
+    </rule>
+
+    <rule id="subject_orchestrates">
+      <title>Subject оркестрирует, не реализует</title>
+      <correct>
+        SubjectSession.send() → toolExecutor.execute() → IToolRuntimeExecutor.instance
+      </correct>
+      <forbidden>
+        Subject напрямую вызывает Docker API
+        Subject напрямую пишет в файловую систему минуя capability check
+      </forbidden>
+    </rule>
+
+    <rule id="one_path_per_service">
+      <title>Один путь доступа к сервису — через его порт</title>
+      <description>
+        Клиент не должен думать как обратиться к сервису.
+        Есть один путь: Interface.instance.
+        Нет альтернатив: не через конструктор, не через другой сервис напрямую.
+      </description>
+      <example_correct>
+        IToolHandlerRegistry.instance.registerHandler(name, handler)
+      </example_correct>
+      <example_forbidden>
+        (toolRuntime as ToolRuntime).registerHandler(name, handler)
+      </example_forbidden>
+    </rule>
+
+    <rule id="subservice_ownership">
+      <title>Подсервис принадлежит плоскости которая даёт ему смысл</title>
+      <description>
+        Если сервис не имеет смысла без другого сервиса — он подсервис.
+        IToolHandlerRegistry без Tool Runtime не имеет смысла → Tool Plane.
+        IToolExecutorFactory без Subject Registry не имеет смысла → Subject Plane.
+        ResourceManager без Sandbox не имеет смысла → Sandbox Plane.
+      </description>
+    </rule>
+
+  </interaction_rules>
+
+  <!-- ============================================ -->
+  <!-- PIPELINE — основной поток данных -->
+  <!-- ============================================ -->
+
+  <pipeline>
+    <description>
+      1. Пользователь создаёт Sandbox (ISandboxProvider.create)
+      2. Наполняет Tools (IAQToolRegistrySimple.register)
+      3. Регистрирует Subject (IAQSubjectRegistry.register)
+      4. Создаёт сессию (IAQSubjectRegistry.createSession)
+         → Sandbox создаётся/выделяется
+         → ToolExecutor создаётся с whitelist tools
+         → SubjectSession создаётся
+      5. Отправляет запрос (session.send / session.sendStream)
+         → Subject executor обрабатывает
+         → Вызывает tools через IToolRuntimeExecutor
+         → Tools работают в sandbox контексте
+      6. Получает результат
+      7. Dispose сессии → ресурсы освобождаются
+    </description>
+  </pipeline>
+
+</sandbox_tools_subject_rules>

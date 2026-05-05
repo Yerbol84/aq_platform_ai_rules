@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<omniroute_connection_skill version="1.0">
+
+  <!--
+    НАВЫК: Подключение к OmniRoute LLM Proxy
+    
+    OmniRoute — локальный LLM proxy, запущенный в том же контейнере.
+    Порт: 20128. Процесс: next-server (Node.js).
+    
+    Этот файл содержит все паттерны подключения, диагностику и решения
+    проблем которые были обнаружены в ходе работы.
+  -->
+
+  <!-- ============================================ -->
+  <!-- ТОПОЛОГИЯ СЕТИ -->
+  <!-- ============================================ -->
+
+  <network_topology>
+    <description>
+      Контейнер содержит:
+      - OmniRoute (next-server) на порту 20128 — LLM proxy
+      - gost на порту 40001 — HTTP proxy → Webshare (191.96.254.138:6185)
+      - aq_llm_proxy (socat) — форвардит внешний 20128 → localhost:20128
+      
+      Наш IP: 172.24.0.2
+      OmniRoute IP: 172.24.0.2 (тот же контейнер!)
+      
+      ВАЖНО: gost настроен как системный HTTP proxy.
+      Все HTTP запросы к localhost перехватываются gost и уходят на Webshare.
+      Webshare блокирует запросы к localhost (client_connect_invalid_ip).
+    </description>
+
+    <env_vars>
+      <var name="http_proxy">http://lehvvesv:ock63zcrzs7a@191.96.254.138:6185</var>
+      <var name="https_proxy">http://lehvvesv:ock63zcrzs7a@191.96.254.138:6185</var>
+      <var name="ALL_PROXY">http://lehvvesv:ock63zcrzs7a@191.96.254.138:6185</var>
+    </env_vars>
+  </network_topology>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛЬНАЯ КОНФИГУРАЦИЯ -->
+  <!-- ============================================ -->
+
+  <correct_configuration>
+
+    <env_file path="/my_dir/work_dir/aq_tools_example_app/.env">
+      <content><![CDATA[
+OMNI_BASE_URL=http://localhost:20128/api/v1
+OMNI_API_KEY=<ключ вида sk-37f29b...>
+OMNI_MODEL=gemini/gemini-2.0-flash
+OMNI_PROVIDER=omni
+      ]]></content>
+      <critical_notes>
+        - OMNI_PROVIDER должен быть "omni", НЕ "gemini"
+        - OMNI_MODEL должен быть "gemini/gemini-2.0-flash" (с префиксом провайдера)
+        - Если OMNI_PROVIDER=gemini → URL идёт напрямую в Google API → ключ не принят
+        - OMNI_BASE_URL используется через env override: ${PROVIDER}_BASE_URL
+      </critical_notes>
+    </env_file>
+
+    <dart_code>
+      <description>Dart HttpClient уже настроен правильно в SimpleNetContext</description>
+      <file>aq_sandbox/lib/src/contexts/simple_net_context.dart</file>
+      <pattern><![CDATA[
+HttpClient _makeClient(String url) {
+  final client = HttpClient();
+  final host = Uri.parse(url).host;
+  // КРИТИЧНО: bypass системного прокси для localhost
+  if (host == 'localhost' || host == '127.0.0.1' || host == '::1' ||
+      host == 'host.docker.internal') {
+    client.findProxy = (_) => 'DIRECT';
+  }
+  return client;
+}
+      ]]></pattern>
+      <note>
+        findProxy = DIRECT обходит gost для localhost.
+        Без этого gost отправляет запрос на Webshare → 403 Forbidden.
+      </note>
+    </dart_code>
+
+    <provider_resolution>
+      <description>Как LlmAgentExecutor резолвит baseUrl</description>
+      <file>aq_subject_runtime/lib/src/constants/llm_agent_keys.dart</file>
+      <logic><![CDATA[
+// _resolveBaseUrl(provider):
+// 1. Ищет env var: ${PROVIDER.toUpperCase()}_BASE_URL
+//    Пример: OMNI_PROVIDER=omni → ищет OMNI_BASE_URL
+// 2. Если нет — ищет в providerBaseUrls map
+// 3. Если нет — бросает ArgumentError
+
+// providerBaseUrls содержит:
+// 'gemini' → 'https://generativelanguage.googleapis.com/v1beta/openai'  ← GOOGLE НАПРЯМУЮ
+// 'omni'   → НЕТ в map → нужен OMNI_BASE_URL env var
+// 'ollama' → 'http://localhost:11434/v1'
+      ]]></logic>
+      <conclusion>
+        OMNI_PROVIDER=omni + OMNI_BASE_URL=http://localhost:20128/api/v1 → правильно.
+        OMNI_PROVIDER=gemini → идёт напрямую в Google, ключ OmniRoute не принят.
+      </conclusion>
+    </provider_resolution>
+
+  </correct_configuration>
+
+  <!-- ============================================ -->
+  <!-- ДИАГНОСТИКА ПРОБЛЕМ -->
+  <!-- ============================================ -->
+
+  <diagnostics>
+
+    <problem id="client_connect_invalid_ip">
+      <symptom>HTTP 403: "You are forbidden to connect to client_connect_invalid_ip"</symptom>
+      <header>X-Webshare-Error: 403, X-Webshare-Reason: client_connect_invalid_ip</header>
+      <cause>
+        curl/HTTP клиент идёт через системный прокси gost → Webshare.
+        Webshare получает запрос "подключись к localhost" — отказывает.
+      </cause>
+      <solution>
+        curl: добавить --noproxy "*" или --noproxy "localhost,127.0.0.1"
+        Dart: client.findProxy = (_) => 'DIRECT' для localhost (уже сделано в SimpleNetContext)
+      </solution>
+      <verify>curl -s --noproxy "*" http://localhost:20128/api/v1/models -H "Authorization: Bearer KEY"</verify>
+    </problem>
+
+    <problem id="api_key_not_valid">
+      <symptom>LLM API error 400: API key not valid. Please pass a valid API key.</symptom>
+      <cause>
+        OMNI_PROVIDER=gemini → запрос идёт напрямую в Google API.
+        Ключ sk-37f29b... — это ключ OmniRoute, не Google API ключ.
+        Google его не знает → 400.
+      </cause>
+      <solution>
+        Установить OMNI_PROVIDER=omni и OMNI_BASE_URL=http://localhost:20128/api/v1
+      </solution>
+    </problem>
+
+    <problem id="model_cooldown_429">
+      <symptom>LLM API error 429: All credentials for model X are cooling down</symptom>
+      <cause>
+        OmniRoute исчерпал rate limit Google API ключей для этой модели.
+        В OmniRoute зарегистрирован 1 Google API ключ (free tier: 15 RPM, 1500 RPD).
+      </cause>
+      <solution>
+        1. Подождать reset_seconds (указан в ответе)
+        2. Использовать другую модель: gemini/gemini-2.0-flash-lite
+        3. Добавить ещё Google API ключей в OmniRoute через UI
+        4. Дневной лимит сбрасывается в UTC midnight
+      </solution>
+      <check_db><![CDATA[
+cd /app && node -e "
+const Database = require('./node_modules/better-sqlite3');
+const db = new Database('./data/storage.sqlite');
+const rows = db.prepare(\"SELECT name, is_active, error_code, last_error, rate_limited_until FROM provider_connections WHERE provider='gemini'\").all();
+rows.forEach(r => console.log(r.name, 'active:', r.is_active, 'error:', r.error_code, 'until:', r.rate_limited_until));
+"
+      ]]></check_db>
+    </problem>
+
+    <problem id="ambiguous_model">
+      <symptom>LLM API error 400: Ambiguous model 'X'. Use provider/model prefix</symptom>
+      <cause>Модель указана без префикса провайдера.</cause>
+      <solution>
+        Использовать полное имя: gemini/gemini-2.0-flash, НЕ просто gemini-2.0-flash
+      </solution>
+    </problem>
+
+    <problem id="limiter_stopped_502">
+      <symptom>LLM API error 502: This limiter has been stopped</symptom>
+      <cause>OmniRoute внутренний circuit breaker или rate limiter остановлен.</cause>
+      <solution>Подождать 30-60 секунд. OmniRoute сам восстанавливается.</solution>
+    </problem>
+
+  </diagnostics>
+
+  <!-- ============================================ -->
+  <!-- БЫСТРАЯ ПРОВЕРКА РАБОТОСПОСОБНОСТИ -->
+  <!-- ============================================ -->
+
+  <health_check>
+    <step order="1" name="OmniRoute доступен">
+      <command>curl -s --noproxy "*" http://localhost:20128/api/v1/models -H "Authorization: Bearer KEY" | python3 -c "import sys,json; print([m['id'] for m in json.load(sys.stdin).get('data',[])][:3])"</command>
+      <expected>Список моделей</expected>
+    </step>
+
+    <step order="2" name="LLM отвечает">
+      <command>curl -s --noproxy "*" -X POST http://localhost:20128/api/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer KEY" -d '{"model":"gemini/gemini-2.0-flash","messages":[{"role":"user","content":"Say: OK"}],"stream":false}' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('choices',[{}])[0].get('message',{}).get('content','ERROR:'+str(d.get('error',{}).get('message',''))))"</command>
+      <expected>OK</expected>
+    </step>
+
+    <step order="3" name="Dart пример работает">
+      <command>cd /my_dir/work_dir/aq_tools_example_app &amp;&amp; OMNI_API_KEY=KEY OMNI_MODEL=gemini/gemini-2.0-flash OMNI_PROVIDER=omni OMNI_BASE_URL=http://localhost:20128/api/v1 dart run bin/agent_clean_example.dart</command>
+      <expected>✅ Done!</expected>
+    </step>
+  </health_check>
+
+  <!-- ============================================ -->
+  <!-- МОДЕЛИ И ИХ ВОЗМОЖНОСТИ -->
+  <!-- ============================================ -->
+
+  <models>
+    <model id="gemini/gemini-2.0-flash" tool_calls="yes" speed="fast" tier="free" rpm="15" rpd="1500">
+      <note>Основная рабочая модель. Быстрая, поддерживает tool calls.</note>
+    </model>
+    <model id="gemini/gemini-2.5-flash" tool_calls="yes" speed="medium" tier="free" rpm="10">
+      <note>Умнее, но медленнее. Quota exceeded быстрее.</note>
+    </model>
+    <model id="gemini/gemma-3-27b-it" tool_calls="no">
+      <note>НЕ поддерживает function calling. Для агентов с tools — не использовать.</note>
+    </model>
+    <model id="gemini/gemma-3-4b-it" tool_calls="no">
+      <note>НЕ поддерживает function calling.</note>
+    </model>
+  </models>
+
+  <!-- ============================================ -->
+  <!-- БАЗА ДАННЫХ OMNIROUTE -->
+  <!-- ============================================ -->
+
+  <omniroute_db>
+    <path>/app/data/storage.sqlite</path>
+    <node_module>/app/node_modules/better-sqlite3</node_module>
+    <useful_queries>
+      <query name="Статус ключей Gemini">
+        SELECT name, is_active, error_code, last_error_at FROM provider_connections WHERE provider='gemini'
+      </query>
+      <query name="Последние вызовы">
+        SELECT timestamp, status, model, duration, error_summary FROM call_logs ORDER BY rowid DESC LIMIT 10
+      </query>
+      <query name="API ключи OmniRoute">
+        SELECT key_prefix, ip_allowlist, is_active FROM api_keys WHERE key_prefix LIKE 'sk-%'
+      </query>
+    </useful_queries>
+  </omniroute_db>
+
+  <!-- ============================================ -->
+  <!-- КЛЮЧЕВЫЕ УРОКИ СЕССИИ -->
+  <!-- ============================================ -->
+
+  <lessons_learned>
+    <lesson id="1">
+      Симптом "client_connect_invalid_ip" — это НЕ проблема IP whitelist ключа.
+      Это системный прокси gost перехватывает запрос к localhost.
+      Решение: --noproxy или findProxy = DIRECT в Dart HttpClient.
+    </lesson>
+    <lesson id="2">
+      OMNI_PROVIDER=gemini → прямой Google API. OMNI_PROVIDER=omni → через OmniRoute.
+      Всегда использовать OMNI_PROVIDER=omni для работы через OmniRoute.
+    </lesson>
+    <lesson id="3">
+      Модель указывать с префиксом: gemini/gemini-2.0-flash, не gemini-2.0-flash.
+    </lesson>
+    <lesson id="4">
+      Free tier Google API: 15 RPM, 1500 RPD. При интенсивном тестировании
+      дневной лимит исчерпывается быстро. Добавить несколько ключей в OmniRoute.
+    </lesson>
+    <lesson id="5">
+      X-Forwarded-For заголовок НЕ помогает обойти IP check OmniRoute.
+      OmniRoute проверяет реальный IP TCP соединения, не заголовок.
+    </lesson>
+  </lessons_learned>
+
+</omniroute_connection_skill>

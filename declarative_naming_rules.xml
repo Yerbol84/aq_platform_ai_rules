@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<declarative_naming_rules version="1.0">
+
+  <!--
+    ГЛАВНЫЙ ПРИНЦИП:
+    Имя должно отвечать на вопрос "что это?" без чтения кода вокруг.
+    Читатель не должен угадывать — имя говорит само за себя.
+  -->
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 1: Переменная называется по типу -->
+  <!-- ============================================ -->
+
+  <rule id="variable_named_by_type">
+    <title>Переменная называется по имени своего типа (camelCase)</title>
+    <description>
+      Если тип достаточно специфичен — переменная называется так же как тип.
+      Не нужно придумывать абстрактное имя когда тип уже всё говорит.
+    </description>
+    <examples>
+      <example type="correct">
+        final SandboxResources sandboxResources = ...;
+        final RunContext runContext = ...;
+        final SubjectDescriptor subjectDescriptor = ...;
+        final ToolContract toolContract = ...;
+        final SandboxPolicy sandboxPolicy = ...;
+      </example>
+      <example type="incorrect">
+        final SandboxResources resources = ...;   // что за resources?
+        final RunContext context = ...;           // какой context?
+        final SubjectDescriptor descriptor = ...; // descriptor чего?
+        final ToolContract contract = ...;        // contract чего?
+      </example>
+    </examples>
+    <exception>
+      Если переменных одного типа несколько — добавляй уточняющий префикс:
+      sessionRunContext, parentRunContext, childRunContext
+    </exception>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 2: Поле класса называется по типу -->
+  <!-- ============================================ -->
+
+  <rule id="field_named_by_type">
+    <title>Поле класса называется по имени своего типа. Приватные: _camelCase</title>
+    <examples>
+      <example type="correct">
+        final class SubjectSession {
+          final RunContext _runContext;
+          final SandboxResources _sandboxResources;
+          final ISandboxHandle _sandboxHandle;
+          final SubjectDescriptor _subjectDescriptor;
+        }
+      </example>
+      <example type="incorrect">
+        final class SubjectSession {
+          final RunContext _context;      // какой context?
+          final SandboxResources _res;    // сокращение запрещено
+          final ISandboxHandle _sandbox;  // sandbox или handle?
+          final SubjectDescriptor _desc;  // сокращение запрещено
+        }
+      </example>
+    </examples>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 3: Параметры методов -->
+  <!-- ============================================ -->
+
+  <rule id="parameter_named_by_type">
+    <title>Параметры методов называются по типу</title>
+    <examples>
+      <example type="correct">
+        Future&lt;ToolOutput&gt; execute(ToolInput toolInput, RunContext runContext);
+        Future&lt;void&gt; save(SubjectRecord subjectRecord);
+        IToolExecutor create(List&lt;ToolRef&gt; allowedToolRefs, RunContext sessionRunContext);
+      </example>
+      <example type="incorrect">
+        Future&lt;ToolOutput&gt; execute(ToolInput input, RunContext context);
+        Future&lt;void&gt; save(SubjectRecord record);
+      </example>
+    </examples>
+    <exception>
+      Широко принятые в Dart/Flutter исключения допустимы:
+      BuildContext context, String id, String name, int index
+    </exception>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 4: Типы — домен + роль -->
+  <!-- ============================================ -->
+
+  <rule id="type_named_declaratively">
+    <title>Тип называется: {Домен}{Роль}</title>
+    <description>
+      Домен: Sandbox, Tool, Subject, Run, Session, Llm, Mcp...
+      Роль: Repository, Registry, Factory, Executor, Handler, Manager, Context, Resources...
+    </description>
+    <examples>
+      <example type="correct">
+        ISubjectRepository       // Subject + Repository
+        IToolHandlerRegistry     // Tool + Handler + Registry
+        SandboxResourceManager   // Sandbox + Resource + Manager
+        SubjectSessionFactory    // Subject + Session + Factory
+        RunContext               // Run + Context
+        SandboxResources         // Sandbox + Resources
+      </example>
+      <example type="incorrect">
+        IRepository              // какой репозиторий?
+        ResourceManager          // каких ресурсов?
+        Context                  // какой контекст?
+      </example>
+    </examples>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 5: Запрет сокращений -->
+  <!-- ============================================ -->
+
+  <rule id="no_abbreviations">
+    <title>Сокращения запрещены</title>
+    <forbidden>res, ctx, desc, cfg, mgr, svc, repo, impl, tmp, val, obj, ref, spec</forbidden>
+    <allowed>Только общепринятые: id, url, api, http, llm, mcp, fs, io, db</allowed>
+    <examples>
+      <example type="incorrect">
+        final SandboxResources res = ...;
+        final RunContext ctx = ...;
+        final SubjectDescriptor desc = ...;
+      </example>
+      <example type="correct">
+        final SandboxResources sandboxResources = ...;
+        final RunContext runContext = ...;
+        final SubjectDescriptor subjectDescriptor = ...;
+      </example>
+    </examples>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- ПРАВИЛО 6: Коллекции -->
+  <!-- ============================================ -->
+
+  <rule id="collections_named_plural">
+    <title>Коллекции — множественное число по типу элемента</title>
+    <examples>
+      <example type="correct">
+        final List&lt;ToolRef&gt; toolRefs = ...;
+        final List&lt;SubjectRecord&gt; subjectRecords = ...;
+        final Map&lt;String, SubjectSessionPool&gt; subjectSessionPools = ...;
+      </example>
+      <example type="incorrect">
+        final List&lt;ToolRef&gt; tools = ...;       // это ToolRef, не Tool
+        final List&lt;SubjectRecord&gt; records = ...; // records чего?
+        final Map&lt;String, SubjectSessionPool&gt; pools = ...; // pools чего?
+      </example>
+    </examples>
+  </rule>
+
+  <!-- ============================================ -->
+  <!-- САМОПРОВЕРКА -->
+  <!-- ============================================ -->
+
+  <self_check>
+    <question>Если убрать тип из объявления — понятно ли что это из имени?</question>
+    <if_no>Переименовать по типу.</if_no>
+
+    <question>Есть ли сокращение в имени?</question>
+    <if_yes>Раскрыть полностью.</if_yes>
+
+    <question>Содержит ли имя домен (Sandbox/Tool/Subject/Run)?</question>
+    <if_no>Добавить домен если тип используется в нескольких доменах.</if_no>
+  </self_check>
+
+</declarative_naming_rules>
